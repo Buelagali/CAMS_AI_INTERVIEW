@@ -1,0 +1,167 @@
+const { v4: uuidv4 } = require('uuid');
+const { evaluateAnswer } = require('../services/bertService');
+const { generateAIFeedback } = require('../services/llamaService');
+const { analyzeAudioFeatures } = require('../services/speechService');
+const { calculateScore } = require('../services/scoringService');
+const { fuseFeatures } = require('../utils/crossAttentionFusion');
+const { getSkillGraphScore } = require('../utils/skillGraph');
+
+const sessions = {};
+
+exports.createSession = (req, res) => {
+  const { name, email, role } = req.body;
+  const sessionId = uuidv4();
+  sessions[sessionId] = {
+    id: sessionId,
+    name,
+    email,
+    role,
+    createdAt: new Date(),
+    answers: [],
+    scores: {},
+    feedback: null,
+    resumeData: null,
+    resumeMatchScore: null,
+    emotionHistory: [],
+    confidenceHistory: [],
+    behaviorHistory: [],
+    currentQuestionIndex: 0,
+  };
+  res.json({ sessionId, session: sessions[sessionId] });
+};
+
+exports.getSession = (req, res) => {
+  const session = sessions[req.params.sessionId];
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  res.json(session);
+};
+
+exports.submitAnswer = async (req, res) => {
+  const { sessionId } = req.params;
+  const { question, answer, questionType, emotionData, videoData, audioData } = req.body;
+  const session = sessions[sessionId];
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  const semanticScore = await evaluateAnswer(question, answer);
+  const audioFeatures = await analyzeAudioFeatures(audioData);
+  const confidenceScore = audioFeatures.confidence || 0.5;
+
+  const answerRecord = {
+    question,
+    answer,
+    questionType,
+    semanticScore,
+    confidenceScore,
+    emotionData,
+    timestamp: new Date(),
+  };
+  session.answers.push(answerRecord);
+  if (emotionData) session.emotionHistory.push(emotionData);
+  if (confidenceScore) session.confidenceHistory.push(confidenceScore);
+
+  session.scores.semantic = semanticScore;
+  session.scores.confidence = confidenceScore;
+
+  res.json({ answerRecord, nextQuestion: session.currentQuestionIndex + 1 });
+};
+
+exports.generateFeedback = async (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions[sessionId];
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  const unifiedFeatures = fuseFeatures({
+    resume: session.resumeData,
+    answers: session.answers,
+    emotions: session.emotionHistory,
+    confidence: session.confidenceHistory,
+    behavior: session.behaviorHistory,
+  });
+
+  const skillGraphScore = getSkillGraphScore(
+    session.resumeData?.skills || [],
+    session.role || ''
+  );
+
+  const scores = calculateScore({
+    answers: session.answers,
+    resumeMatch: session.resumeMatchScore || 0,
+    skillGraph: skillGraphScore,
+    unified: unifiedFeatures,
+  });
+
+  session.finalScores = scores;
+
+  const feedback = await generateAIFeedback({
+    name: session.name,
+    role: session.role,
+    answers: session.answers,
+    scores,
+    resumeData: session.resumeData,
+  });
+
+  session.feedback = feedback;
+  res.json({ scores, feedback });
+};
+
+exports.getQuestions = (req, res) => {
+  const { role } = req.query;
+  const questions = generateAdaptiveQuestions(role || 'Software Developer');
+  res.json({ questions });
+};
+
+function generateAdaptiveQuestions(role) {
+  const questionBank = {
+    'Software Developer': [
+      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
+      { id: 2, type: 'technical', question: 'Explain React Hooks and their use cases.' },
+      { id: 3, type: 'technical', question: 'What is the difference between REST and GraphQL?' },
+      { id: 4, type: 'technical', question: 'Explain the concept of virtual DOM.' },
+      { id: 5, type: 'behavioral', question: 'Describe a challenging bug you fixed.' },
+      { id: 6, type: 'technical', question: 'What are microservices? Explain their pros and cons.' },
+      { id: 7, type: 'behavioral', question: 'How do you handle tight deadlines?' },
+      { id: 8, type: 'hr', question: 'Where do you see yourself in 5 years?' },
+    ],
+    'AI/ML Engineer': [
+      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
+      { id: 2, type: 'technical', question: 'Explain the difference between supervised and unsupervised learning.' },
+      { id: 3, type: 'technical', question: 'What is overfitting and how do you prevent it?' },
+      { id: 4, type: 'technical', question: 'Explain transformers in NLP.' },
+      { id: 5, type: 'behavioral', question: 'Describe an ML project you deployed.' },
+      { id: 6, type: 'technical', question: 'What evaluation metrics do you use for classification?' },
+      { id: 7, type: 'behavioral', question: 'How do you handle imbalanced datasets?' },
+      { id: 8, type: 'hr', question: 'Why are you interested in AI/ML?' },
+    ],
+    'Data Analyst': [
+      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
+      { id: 2, type: 'technical', question: 'Explain the difference between SQL and NoSQL databases.' },
+      { id: 3, type: 'technical', question: 'What is a p-value in statistics?' },
+      { id: 4, type: 'technical', question: 'How do you handle missing data?' },
+      { id: 5, type: 'behavioral', question: 'Describe a data-driven decision you influenced.' },
+      { id: 6, type: 'technical', question: 'Explain different types of joins in SQL.' },
+      { id: 7, type: 'behavioral', question: 'How do you present findings to stakeholders?' },
+      { id: 8, type: 'hr', question: 'What tools do you use for data analysis?' },
+    ],
+    'Cloud Engineer': [
+      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
+      { id: 2, type: 'technical', question: 'Explain the differences between IaaS, PaaS, and SaaS.' },
+      { id: 3, type: 'technical', question: 'What is Docker and how does it work?' },
+      { id: 4, type: 'technical', question: 'Explain CI/CD pipeline.' },
+      { id: 5, type: 'behavioral', question: 'Describe a cloud migration you worked on.' },
+      { id: 6, type: 'technical', question: 'What is Kubernetes and why use it?' },
+      { id: 7, type: 'behavioral', question: 'How do you ensure security in the cloud?' },
+      { id: 8, type: 'hr', question: 'Which cloud providers are you experienced with?' },
+    ],
+    'Cyber Security Analyst': [
+      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
+      { id: 2, type: 'technical', question: 'What is the difference between threat, vulnerability, and risk?' },
+      { id: 3, type: 'technical', question: 'Explain the OWASP Top 10.' },
+      { id: 4, type: 'technical', question: 'How do you handle a security breach?' },
+      { id: 5, type: 'behavioral', question: 'Describe a security incident you resolved.' },
+      { id: 6, type: 'technical', question: 'What is encryption and why is it important?' },
+      { id: 7, type: 'behavioral', question: 'How do you stay updated on security threats?' },
+      { id: 8, type: 'hr', question: 'Why did you choose cybersecurity?' },
+    ],
+  };
+  return questionBank[role] || questionBank['Software Developer'];
+}
