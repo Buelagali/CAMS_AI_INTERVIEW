@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, Cell } from 'recharts';
 import FeedbackCard from '../components/FeedbackCard';
 import ResumeSummary from '../components/ResumeSummary';
 
@@ -12,32 +11,44 @@ export default function Dashboard() {
   const resumeData = JSON.parse(sessionStorage.getItem('resumeData') || '{}');
   const resumeMatch = JSON.parse(sessionStorage.getItem('resumeMatch') || '{}');
 
-  const scoreEntries = Object.entries(scores)
-    .filter(([k]) => k !== 'overall')
-    .map(([key, val]) => ({ category: key.charAt(0).toUpperCase() + key.slice(1), score: val }));
+  const scoreEntries = [
+    { key: 'technical', label: 'Technical', color: '#6c63ff' },
+    { key: 'communication', label: 'Communication', color: '#00d4aa' },
+    { key: 'confidence', label: 'Confidence', color: '#ffd93d' },
+    { key: 'behavior', label: 'Behavior', color: '#ff6b9d' },
+    { key: 'emotionStability', label: 'Emotion Stability', color: '#f472b6' },
+    { key: 'resumeMatch', label: 'Resume Match', color: '#ff8a5c' },
+    { key: 'projectKnowledge', label: 'Project Knowledge', color: '#a78bfa' },
+    { key: 'roleMatch', label: 'Role Match', color: '#34d399' },
+  ];
 
-  const performanceData = scoreEntries.map((s, i) => ({
-    name: s.category,
-    value: s.score,
-    fill: ['#6c63ff', '#00d4aa', '#ffd93d', '#ff6b9d', '#ff8a5c', '#a78bfa', '#34d399', '#f472b6'][i] || '#6c63ff',
+  const performanceData = scoreEntries.map((s) => ({
+    name: s.label,
+    value: scores[s.key] || 0,
+    fill: s.color,
   }));
 
-  const timelineData = [
-    { question: 'Q1', score: Math.round(scores.technical * 0.7 + Math.random() * 20) },
-    { question: 'Q2', score: Math.round(scores.semantic * 0.6 + Math.random() * 25) },
-    { question: 'Q3', score: Math.round(scores.confidence * 0.8 + Math.random() * 15) },
-    { question: 'Q4', score: Math.round(scores.technical * 0.6 + Math.random() * 20) },
-    { question: 'Q5', score: Math.round(scores.communication * 0.7 + Math.random() * 25) },
-    { question: 'Q6', score: Math.round(scores.behavior * 0.8 + Math.random() * 15) },
-    { question: 'Q7', score: Math.round(scores.semantic * 0.5 + Math.random() * 30) },
-    { question: 'Q8', score: Math.round(scores.overall * 0.5 + Math.random() * 10) },
-  ];
+  const scoreValues = scoreEntries
+    .filter((s) => scores[s.key])
+    .map((s) => ({ category: s.label, score: scores[s.key] }));
+
+  const avgPerf = scoreValues.length > 0
+    ? Math.round(scoreValues.reduce((a, b) => b.score + a, 0) / scoreValues.length)
+    : 0;
+
+  const topScore = scoreValues.length > 0
+    ? scoreValues.reduce((a, b) => a.score > b.score ? a : b)
+    : { category: 'N/A', score: 0 };
+
+  const lowScore = scoreValues.length > 0
+    ? scoreValues.reduce((a, b) => a.score < b.score ? a : b)
+    : { category: 'N/A', score: 0 };
 
   return (
     <div className="page fade-in">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 40 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontSize: 28, marginBottom: 4 }}>Performance <span className="gradient-text">Dashboard</span></h1>
+          <h1 style={{ fontSize: 28, marginBottom: 4 }}>Recruiter <span className="gradient-text">Dashboard</span></h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
             {candidate.name} &middot; {candidate.role}
           </p>
@@ -50,32 +61,66 @@ export default function Dashboard() {
         </div>
       </div>
 
+      <div className="grid-3" style={{ marginBottom: 24 }}>
+        <div className="card" style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 28, fontWeight: 700, color: avgPerf >= 65 ? 'var(--accent-2)' : 'var(--accent-3)' }}>{avgPerf}%</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Average Performance</div>
+        </div>
+        <div className="card" style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--accent-2)' }}>{topScore.score}%</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Best: {topScore.category}</div>
+        </div>
+        <div className="card" style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--accent-3)' }}>{lowScore.score}%</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Needs Work: {lowScore.category}</div>
+        </div>
+      </div>
+
       <div className="grid-2" style={{ marginBottom: 32 }}>
         <div className="card">
-          <h3 style={{ fontSize: 16, marginBottom: 16, color: 'var(--text-secondary)' }}>Performance Timeline</h3>
-          <ResponsiveContainer width="100%" height={250}>
-            <AreaChart data={timelineData}>
+          <h3 style={{ fontSize: 16, marginBottom: 16, color: 'var(--text-secondary)' }}>Performance Overview</h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <AreaChart data={performanceData}>
               <defs>
-                <linearGradient id="timelineGrad" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="perfGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="var(--accent-1)" stopOpacity={0.3} />
                   <stop offset="95%" stopColor="var(--accent-1)" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="question" tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 12 }} />
+              <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 11 }} angle={-35} textAnchor="end" height={80} />
               <YAxis domain={[0, 100]} tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 11 }} />
               <Tooltip
                 contentStyle={{ background: '#1a1a3a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: 'white' }}
               />
-              <Area type="monotone" dataKey="score" stroke="var(--accent-1)" fill="url(#timelineGrad)" strokeWidth={2} />
+              <Area type="monotone" dataKey="value" stroke="var(--accent-1)" fill="url(#perfGrad)" strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
 
-        <ResumeSummary resumeData={resumeData} resumeMatch={resumeMatch} />
+        <div className="card">
+          <h3 style={{ fontSize: 16, marginBottom: 16, color: 'var(--text-secondary)' }}>Score Comparison</h3>
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart data={performanceData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+              <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 11 }} angle={-35} textAnchor="end" height={80} />
+              <YAxis domain={[0, 100]} tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 11 }} />
+              <Tooltip
+                contentStyle={{ background: '#1a1a3a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: 'white' }}
+              />
+              <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+                {performanceData.map((entry, idx) => (
+                  <Cell key={idx} fill={entry.fill} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
       </div>
 
-      {feedback.strengths && <FeedbackCard feedback={feedback} />}
+      <ResumeSummary resumeData={resumeData} resumeMatch={resumeMatch} />
+
+      {feedback.strengths && <div style={{ marginTop: 24 }}><FeedbackCard feedback={feedback} /></div>}
 
       <div style={{ marginTop: 32, display: 'flex', gap: 12, justifyContent: 'center' }}>
         <button className="btn btn-secondary" onClick={() => navigate('/result')}>

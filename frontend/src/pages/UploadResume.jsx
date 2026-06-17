@@ -50,7 +50,6 @@ export default function UploadResume() {
   };
 
   const handleProceed = () => {
-    sessionStorage.setItem('questions', JSON.stringify(generateQuestions(candidate.role, resumeData)));
     navigate('/interview');
   };
 
@@ -208,58 +207,4 @@ function parseMockResume(text) {
   return { rawText: text.substring(0, 3000), skills, experience, education, projects: [], certifications: [] };
 }
 
-function generateQuestions(role, resumeData) {
-  const banks = {
-    'Software Developer': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain React Hooks and their use cases.' },
-      { id: 3, type: 'resume', question: 'Can you describe your experience with the skills listed on your resume?' },
-      { id: 4, type: 'technical', question: 'What is the difference between REST and GraphQL?' },
-      { id: 5, type: 'behavioral', question: 'Describe a challenging bug you fixed.' },
-      { id: 6, type: 'technical', question: 'Explain the virtual DOM.' },
-      { id: 7, type: 'behavioral', question: 'How do you handle tight deadlines?' },
-      { id: 8, type: 'hr', question: 'Where do you see yourself in 5 years?' },
-    ],
-    'AI/ML Engineer': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain supervised vs unsupervised learning.' },
-      { id: 3, type: 'resume', question: 'Describe your ML projects from your resume.' },
-      { id: 4, type: 'technical', question: 'What is overfitting and how to prevent it?' },
-      { id: 5, type: 'behavioral', question: 'Describe an ML project you deployed.' },
-      { id: 6, type: 'technical', question: 'Explain transformers in NLP.' },
-      { id: 7, type: 'behavioral', question: 'How do you handle imbalanced datasets?' },
-      { id: 8, type: 'hr', question: 'Why are you interested in AI/ML?' },
-    ],
-    'Data Analyst': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain SQL vs NoSQL databases.' },
-      { id: 3, type: 'resume', question: 'What data tools have you used in your projects?' },
-      { id: 4, type: 'technical', question: 'What is a p-value?' },
-      { id: 5, type: 'behavioral', question: 'Describe a data-driven decision you made.' },
-      { id: 6, type: 'technical', question: 'Explain different SQL joins.' },
-      { id: 7, type: 'behavioral', question: 'How do you present data to stakeholders?' },
-      { id: 8, type: 'hr', question: 'What analysis tools do you prefer?' },
-    ],
-    'Cloud Engineer': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain IaaS vs PaaS vs SaaS.' },
-      { id: 3, type: 'resume', question: 'What cloud platforms have you worked with?' },
-      { id: 4, type: 'technical', question: 'How does Docker work?' },
-      { id: 5, type: 'behavioral', question: 'Describe a cloud migration you worked on.' },
-      { id: 6, type: 'technical', question: 'What is Kubernetes?' },
-      { id: 7, type: 'behavioral', question: 'How do you ensure cloud security?' },
-      { id: 8, type: 'hr', question: 'Which cloud providers do you use?' },
-    ],
-    'Cyber Security Analyst': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain threat vs vulnerability vs risk.' },
-      { id: 3, type: 'resume', question: 'What security tools do you use?' },
-      { id: 4, type: 'technical', question: 'Explain OWASP Top 10.' },
-      { id: 5, type: 'behavioral', question: 'Describe a security incident you handled.' },
-      { id: 6, type: 'technical', question: 'Why is encryption important?' },
-      { id: 7, type: 'behavioral', question: 'How do you stay updated on threats?' },
-      { id: 8, type: 'hr', question: 'Why cybersecurity?' },
-    ],
-  };
-  return banks[role] || banks['Software Developer'];
-}
+

@@ -24,14 +24,26 @@ export default function Result() {
     { metric: 'Confidence', value: scores.confidence || 0 },
     { metric: 'Behavior', value: scores.behavior || 0 },
     { metric: 'Resume Match', value: scores.resumeMatch || 0 },
-    { metric: 'Semantic', value: scores.semantic || 0 },
+    { metric: 'Role Match', value: scores.roleMatch || 0 },
   ];
 
-  const barData = Object.entries(scores)
-    .filter(([k]) => k !== 'overall')
-    .map(([key, val]) => ({ name: key.charAt(0).toUpperCase() + key.slice(1), score: val }));
+  const scoreEntries = [
+    { key: 'technical', label: 'Technical', color: 'var(--accent-1)' },
+    { key: 'communication', label: 'Communication', color: 'var(--accent-2)' },
+    { key: 'confidence', label: 'Confidence', color: 'var(--accent-4)' },
+    { key: 'behavior', label: 'Behavior', color: 'var(--accent-3)' },
+    { key: 'resumeMatch', label: 'Resume Match', color: 'var(--accent-5)' },
+    { key: 'emotionStability', label: 'Emotion Stability', color: '#f472b6' },
+    { key: 'projectKnowledge', label: 'Project Knowledge', color: '#a78bfa' },
+    { key: 'roleMatch', label: 'Role Match', color: '#34d399' },
+  ];
 
-  const barColors = ['#6c63ff', '#00d4aa', '#ffd93d', '#ff6b9d', '#ff8a5c', '#a78bfa', '#34d399', '#f472b6'];
+  const barData = scoreEntries.map(({ key, label }) => ({
+    name: label,
+    score: scores[key] || 0,
+  }));
+
+  const barColors = ['#6c63ff', '#00d4aa', '#ffd93d', '#ff6b9d', '#ff8a5c', '#f472b6', '#a78bfa', '#34d399'];
 
   const handleDownloadPDF = () => {
     try {
@@ -59,6 +71,13 @@ export default function Result() {
         <p style={{ color: 'var(--text-secondary)' }}>
           {candidate.name} &middot; {candidate.role}
         </p>
+        <div style={{ marginTop: 8, display: 'flex', gap: 6, justifyContent: 'center', flexWrap: 'wrap' }}>
+          {['Technical', 'Communication', 'Confidence', 'Behavior', 'Emotion Stability', 'Resume Match', 'Project Knowledge', 'Role Match'].map((dim) => (
+            <span key={dim} style={{ padding: '2px 10px', borderRadius: 10, fontSize: 10, background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)' }}>
+              {dim}
+            </span>
+          ))}
+        </div>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 40 }}>
@@ -92,17 +111,8 @@ export default function Result() {
       </div>
 
       <div className="grid-4" style={{ marginBottom: 40 }}>
-        {[
-          { label: 'Technical', value: scores.technical, color: 'var(--accent-1)' },
-          { label: 'Communication', value: scores.communication, color: 'var(--accent-2)' },
-          { label: 'Confidence', value: scores.confidence, color: 'var(--accent-4)' },
-          { label: 'Behavior', value: scores.behavior, color: 'var(--accent-3)' },
-          { label: 'Resume Match', value: scores.resumeMatch, color: 'var(--accent-5)' },
-          { label: 'Emotion', value: scores.emotion, color: 'var(--accent-3)' },
-          { label: 'Semantic', value: scores.semantic, color: '#a78bfa' },
-          { label: 'Skill Graph', value: scores.skillGraph, color: '#34d399' },
-        ].map((s) => (
-          <CircularScore key={s.label} label={s.label} value={s.value} color={s.color} size={120} />
+        {scoreEntries.map(({ key, label, color }) => (
+          <CircularScore key={key} label={label} value={scores[key] || 0} color={color} size={120} />
         ))}
       </div>
 

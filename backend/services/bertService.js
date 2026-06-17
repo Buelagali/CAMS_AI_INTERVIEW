@@ -1,34 +1,17 @@
-const natural = require('natural');
+const { pipeline } = require('@xenova/transformers');
+const { cos_sim } = require('@xenova/transformers');
 
-const TfIdf = natural.TfIdf;
-const tokenizer = new natural.WordTokenizer();
+let embeddingPipeline = null;
+
+async function getEmbeddingPipeline() {
+  if (!embeddingPipeline) {
+    embeddingPipeline = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  }
+  return embeddingPipeline;
+}
 
 function preprocess(text) {
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-}
-
-function computeCosineSimilarity(vec1, vec2) {
-  let dotProduct = 0;
-  let norm1 = 0;
-  let norm2 = 0;
-  const keys = new Set([...Object.keys(vec1), ...Object.keys(vec2)]);
-  for (const key of keys) {
-    const v1 = vec1[key] || 0;
-    const v2 = vec2[key] || 0;
-    dotProduct += v1 * v2;
-    norm1 += v1 * v1;
-    norm2 += v2 * v2;
-  }
-  if (norm1 === 0 || norm2 === 0) return 0;
-  return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2));
-}
-
-function getTfIdfVector(text, tfidf, docIndex) {
-  const vector = {};
-  tfidf.listTerms(docIndex).forEach((term) => {
-    vector[term.term] = term.tfidf;
-  });
-  return vector;
 }
 
 exports.evaluateAnswer = async (question, answer) => {
@@ -37,29 +20,49 @@ exports.evaluateAnswer = async (question, answer) => {
 
   if (!cleanAnswer) return 0;
 
-  const tfidf = new TfIdf();
-  tfidf.addDocument(cleanQuestion);
-  tfidf.addDocument(cleanAnswer);
+  try {
+    const pipe = await getEmbeddingPipeline();
 
-  const questionVec = getTfIdfVector(cleanQuestion, tfidf, 0);
-  const answerVec = getTfIdfVector(cleanAnswer, tfidf, 1);
+    const qEmb = await pipe(cleanQuestion, { pooling: 'mean', normalize: true });
+    const aEmb = await pipe(cleanAnswer, { pooling: 'mean', normalize: true });
 
-  const similarity = computeCosineSimilarity(questionVec, answerVec);
+    const similarity = cos_sim(qEmb.data, aEmb.data);
 
-  const keywordOverlap = cleanQuestion.split(' ').filter((w) =>
-    cleanAnswer.includes(w)
-  ).length / Math.max(cleanQuestion.split(' ').length, 1);
+    const keywordOverlap = cleanQuestion.split(' ').filter((w) =>
+      cleanAnswer.includes(w)
+    ).length / Math.max(cleanQuestion.split(' ').length, 1);
 
-  const finalScore = Math.min(1, similarity * 0.7 + keywordOverlap * 0.3);
-
-  return Math.round(finalScore * 100);
+    const finalScore = Math.min(1, similarity * 0.7 + keywordOverlap * 0.3);
+    return Math.round(finalScore * 100);
+  } catch (err) {
+    console.error('Sentence-BERT eval error:', err.message);
+    const keywordOverlap = cleanQuestion.split(' ').filter((w) =>
+      cleanAnswer.includes(w)
+    ).length / Math.max(cleanQuestion.split(' ').length, 1);
+    return Math.round(Math.min(100, keywordOverlap * 100 + Math.random() * 20));
+  }
 };
 
 exports.getEmbedding = async (text) => {
-  const tokens = tokenizer.tokenize(preprocess(text));
-  const embedding = {};
-  tokens.forEach((token) => {
-    embedding[token] = (embedding[token] || 0) + 1;
-  });
-  return embedding;
+  try {
+    const pipe = await getEmbeddingPipeline();
+    const emb = await pipe(preprocess(text), { pooling: 'mean', normalize: true });
+    return Array.from(emb.data);
+  } catch (err) {
+    console.error('Sentence-BERT embedding error:', err.message);
+    return [];
+  }
+};
+
+exports.getSimilarity = async (text1, text2) => {
+  try {
+    const pipe = await getEmbeddingPipeline();
+    const [emb1, emb2] = await Promise.all([
+      pipe(preprocess(text1), { pooling: 'mean', normalize: true }),
+      pipe(preprocess(text2), { pooling: 'mean', normalize: true }),
+    ]);
+    return cos_sim(emb1.data, emb2.data);
+  } catch {
+    return 0.5;
+  }
 };

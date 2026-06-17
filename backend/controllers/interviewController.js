@@ -1,7 +1,8 @@
 const { v4: uuidv4 } = require('uuid');
 const { evaluateAnswer } = require('../services/bertService');
-const { generateAIFeedback } = require('../services/llamaService');
-const { analyzeAudioFeatures } = require('../services/speechService');
+const { generateFeedback } = require('../services/llmService');
+const { analyzeAudio } = require('../services/audioService');
+const { analyzeFrame } = require('../services/visionService');
 const { calculateScore } = require('../services/scoringService');
 const { fuseFeatures } = require('../utils/crossAttentionFusion');
 const { getSkillGraphScore } = require('../utils/skillGraph');
@@ -25,6 +26,8 @@ exports.createSession = (req, res) => {
     emotionHistory: [],
     confidenceHistory: [],
     behaviorHistory: [],
+    visionHistory: [],
+    audioHistory: [],
     currentQuestionIndex: 0,
   };
   res.json({ sessionId, session: sessions[sessionId] });
@@ -38,13 +41,39 @@ exports.getSession = (req, res) => {
 
 exports.submitAnswer = async (req, res) => {
   const { sessionId } = req.params;
-  const { question, answer, questionType, emotionData, videoData, audioData } = req.body;
+  const {
+    question, answer, questionType,
+    emotionData, videoFrame, audioData,
+    viTResult, audioFeatures,
+  } = req.body;
   const session = sessions[sessionId];
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   const semanticScore = await evaluateAnswer(question, answer);
-  const audioFeatures = await analyzeAudioFeatures(audioData);
-  const confidenceScore = audioFeatures.confidence || 0.5;
+  let confidenceScore = 50;
+
+  let audioAnalysis = null;
+  if (audioData) {
+    try {
+      const audioBuffer = Buffer.from(audioData, 'base64');
+      audioAnalysis = await analyzeAudio(audioBuffer);
+      confidenceScore = audioAnalysis.confidence || 50;
+      session.audioHistory.push(audioAnalysis);
+    } catch (err) {
+      console.warn('Audio analysis failed:', err.message);
+    }
+  }
+
+  let visionAnalysis = null;
+  if (videoFrame) {
+    try {
+      const imageBuffer = Buffer.from(videoFrame, 'base64');
+      visionAnalysis = await analyzeFrame(imageBuffer);
+      session.visionHistory.push(visionAnalysis);
+    } catch (err) {
+      console.warn('ViT frame analysis failed:', err.message);
+    }
+  }
 
   const answerRecord = {
     question,
@@ -52,17 +81,32 @@ exports.submitAnswer = async (req, res) => {
     questionType,
     semanticScore,
     confidenceScore,
-    emotionData,
+    emotionData: emotionData || visionAnalysis?.scores || null,
+    audioAnalysis,
+    visionAnalysis,
     timestamp: new Date(),
   };
   session.answers.push(answerRecord);
   if (emotionData) session.emotionHistory.push(emotionData);
   if (confidenceScore) session.confidenceHistory.push(confidenceScore);
 
+  if (visionAnalysis?.behavior) {
+    session.behaviorHistory.push({
+      engagementScore: visionAnalysis.confidence * 100,
+      attentionSpan: visionAnalysis.behavior === 'attentive' ? 80 : 50,
+      behavior: visionAnalysis.behavior,
+    });
+  }
+
   session.scores.semantic = semanticScore;
   session.scores.confidence = confidenceScore;
 
-  res.json({ answerRecord, nextQuestion: session.currentQuestionIndex + 1 });
+  res.json({
+    answerRecord,
+    nextQuestion: session.currentQuestionIndex + 1,
+    audioAnalysis,
+    visionAnalysis,
+  });
 };
 
 exports.generateFeedback = async (req, res) => {
@@ -76,38 +120,100 @@ exports.generateFeedback = async (req, res) => {
     emotions: session.emotionHistory,
     confidence: session.confidenceHistory,
     behavior: session.behaviorHistory,
+    visionFeatures: session.visionHistory,
+    audioFeatures: session.audioHistory,
   });
 
-  const skillGraphScore = getSkillGraphScore(
+  const skillGraphResult = getSkillGraphScore(
     session.resumeData?.skills || [],
     session.role || ''
   );
 
   const scores = calculateScore({
     answers: session.answers,
-    resumeMatch: session.resumeMatchScore || 0,
-    skillGraph: skillGraphScore,
+    resumeMatch: session.resumeMatchScore || skillGraphResult.score || 0,
+    skillGraph: skillGraphResult.score || 0,
     unified: unifiedFeatures,
   });
 
   session.finalScores = scores;
 
-  const feedback = await generateAIFeedback({
+  const feedback = await generateFeedback({
     name: session.name,
     role: session.role,
     answers: session.answers,
     scores,
     resumeData: session.resumeData,
+    unifiedFeatures,
   });
 
   session.feedback = feedback;
-  res.json({ scores, feedback });
+  res.json({
+    scores,
+    feedback,
+    skillGraph: skillGraphResult,
+    unifiedFeatures: {
+      attentionWeights: unifiedFeatures.attentionWeights,
+      modalityNames: unifiedFeatures.modalityNames,
+      technicalBoost: unifiedFeatures.technicalBoost,
+      behaviorScore: unifiedFeatures.behaviorScore,
+      emotionScore: unifiedFeatures.emotionScore,
+      engagementScore: unifiedFeatures.engagementScore,
+    },
+  });
+};
+
+exports.submitFrame = async (req, res) => {
+  const { sessionId } = req.params;
+  const { frame } = req.body;
+  const session = sessions[sessionId];
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  try {
+    const imageBuffer = Buffer.from(frame, 'base64');
+    const analysis = await analyzeFrame(imageBuffer);
+    session.visionHistory.push(analysis);
+    res.json({ analysis });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.submitAudioChunk = async (req, res) => {
+  const { sessionId } = req.params;
+  const { audio } = req.body;
+  const session = sessions[sessionId];
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  try {
+    const audioBuffer = Buffer.from(audio, 'base64');
+    const analysis = await analyzeAudio(audioBuffer);
+    session.audioHistory.push(analysis);
+    res.json({ analysis });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };
 
 exports.getQuestions = (req, res) => {
   const { role } = req.query;
   const questions = generateAdaptiveQuestions(role || 'Software Developer');
   res.json({ questions });
+};
+
+exports.getSessionAnalytics = (req, res) => {
+  const session = sessions[req.params.sessionId];
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  res.json({
+    totalAnswers: session.answers.length,
+    emotionHistory: session.emotionHistory.slice(-30),
+    confidenceHistory: session.confidenceHistory.slice(-30),
+    visionHistory: session.visionHistory.slice(-20),
+    audioHistory: session.audioHistory.slice(-20),
+    behaviorHistory: session.behaviorHistory.slice(-20),
+    currentQuestionIndex: session.currentQuestionIndex,
+  });
 };
 
 function generateAdaptiveQuestions(role) {
