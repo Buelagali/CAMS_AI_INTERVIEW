@@ -6,6 +6,23 @@ import CircularScore from '../components/CircularScore';
 import { speakText, stopSpeaking } from '../services/speechService';
 import { loadModels, detectEmotion } from '../services/faceDetection';
 import {
+  startCapture,
+  stopCapture,
+  isCurrentlyRecording,
+  getRecordingDuration,
+} from '../services/audioCapture';
+import {
+  initWebSpeech,
+  startWebSpeech,
+  stopWebSpeech,
+  resetTranscript,
+  getAccumulatedTranscript,
+  processFinalTranscript,
+  onTranscript,
+  onStatus,
+  removeListeners,
+} from '../services/sttService';
+import {
   generateQuestion,
   calculateAnswerScore,
   calculateCommunicationScore,
@@ -34,6 +51,9 @@ export default function Interview() {
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [sttStatus, setSttStatus] = useState('');
+  const [transcriptionConfidence, setTranscriptionConfidence] = useState(0);
   const [scores, setScores] = useState({
     technical: 0, communication: 0, confidence: 0, behavior: 0,
     resumeMatch: 0, semantic: 0, emotion: 0, overall: 0,
@@ -55,6 +75,7 @@ export default function Interview() {
   const spokenRef = useRef(false);
   const emotionIntervalRef = useRef(null);
   const memoryRef = useRef(null);
+  const audioCaptureRef = useRef(null);
 
   useEffect(() => {
     const mem = createInitialMemory(candidate.role, resumeData);
@@ -65,11 +86,14 @@ export default function Interview() {
   }, []);
 
   useEffect(() => {
-    initSpeechRecognition();
+    initDualPathSTT();
     initCamera();
     loadModels();
     return () => {
       stopSpeaking();
+      stopWebSpeech();
+      removeListeners();
+      if (isCurrentlyRecording()) stopCapture();
       if (emotionIntervalRef.current) clearInterval(emotionIntervalRef.current);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
@@ -127,24 +151,27 @@ export default function Interview() {
     }
   };
 
-  const initSpeechRecognition = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-    recognition.onresult = (event) => {
-      let interim = '';
-      let final = '';
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) final += event.results[i][0].transcript + ' ';
-        else interim += event.results[i][0].transcript;
+  const initDualPathSTT = () => {
+    const wsInitialized = initWebSpeech();
+
+    onTranscript((text, isInterim) => {
+      setTranscript(text);
+    });
+
+    onStatus((status) => {
+      if (status.type === 'listening') {
+        setSttStatus('Listening via speech recognition...');
+      } else if (status.type === 'transcribed') {
+        setSttStatus(`Backend transcription complete (${status.confidence}% confidence)`);
+        setTranscriptionConfidence(status.confidence);
+      } else if (status.type === 'fallback') {
+        setSttStatus('Using browser speech recognition (backend unavailable)');
+      } else if (status.type === 'error') {
+        setSttStatus(`STT notice: ${status.error}`);
       }
-      setTranscript(final || interim);
-    };
-    recognition.onerror = () => setIsListening(false);
-    recognitionRef.current = recognition;
+    });
+
+    return wsInitialized;
   };
 
   const initCamera = async () => {
@@ -165,15 +192,65 @@ export default function Interview() {
     speakText(currentQuestion.text, () => setIsSpeaking(false));
   };
 
-  const toggleListening = () => {
-    if (!recognitionRef.current) return;
+  const toggleListening = async () => {
     if (isListening) {
-      recognitionRef.current.stop();
       setIsListening(false);
+      setSttStatus('Processing speech...');
+
+      stopWebSpeech();
+
+      let audioResult = null;
+      if (isCurrentlyRecording()) {
+        audioResult = stopCapture();
+      }
+
+      if (audioResult && audioResult.blob && audioResult.blob.size > 100) {
+        setIsTranscribing(true);
+        setSttStatus('Sending to Whisper for improved transcription...');
+
+        const result = await processFinalTranscript(audioResult, {
+          noiseReductionStrength: 0.5,
+          language: 'en',
+        });
+
+        setIsTranscribing(false);
+
+        if (result.text && !result.fallback) {
+          setTranscript(result.text);
+          setTranscriptionConfidence(result.confidence);
+          setSttStatus(`Transcription improved (${result.confidence}% confidence)`);
+        } else if (result.text) {
+          setTranscript(result.text);
+          setTranscriptionConfidence(result.confidence || 45);
+          setSttStatus(result.fallback ? 'Using browser speech result' : 'Transcription complete');
+        }
+      } else {
+        const wsText = getAccumulatedTranscript();
+        if (wsText) {
+          setTranscript(wsText);
+        }
+        setSttStatus('');
+      }
     } else {
       setTranscript('');
-      recognitionRef.current.start();
+      resetTranscript();
       setIsListening(true);
+      setSttStatus('Listening...');
+      setTranscriptionConfidence(0);
+      setIsTranscribing(false);
+
+      startWebSpeech();
+
+      try {
+        const captureResult = await startCapture({
+          noiseGate: true,
+          noiseGateThreshold: 0.008,
+          autoNormalize: true,
+        });
+        audioCaptureRef.current = captureResult;
+      } catch (err) {
+        console.warn('Audio capture not available, using Web Speech only:', err.message);
+      }
     }
   };
 
@@ -181,9 +258,13 @@ export default function Interview() {
     if (!transcript.trim() || isProcessing || !currentQuestion) return;
     setIsProcessing(true);
     setIsListening(false);
-    if (recognitionRef.current) recognitionRef.current.stop();
+    stopWebSpeech();
 
-    const confidenceScore = calculateConfidenceFromAnswer(transcript, emotion);
+    const sttConfidence = transcriptionConfidence > 0 ? transcriptionConfidence : 50;
+    const confidenceScore = Math.round(
+      calculateConfidenceFromAnswer(transcript, emotion) * 0.6 +
+      sttConfidence * 0.4
+    );
     const semanticScore = calculateAnswerScore({
       questionText: currentQuestion.text,
       answerText: transcript,
@@ -263,7 +344,7 @@ export default function Interview() {
       generateNextQuestion(mem);
     }
     setIsProcessing(false);
-  }, [transcript, currentQuestion, isProcessing, answers, scores, emotion, confidenceHistory, candidate.role, resumeData]);
+  }, [transcript, currentQuestion, isProcessing, answers, scores, emotion, confidenceHistory, candidate.role, resumeData, transcriptionConfidence]);
 
   const handleFinish = () => {
     const avgConfidence = confidenceHistory.length > 0
@@ -460,14 +541,21 @@ export default function Interview() {
             <div className="card" style={{ marginTop: 16 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                 <h3 style={{ fontSize: 14, color: 'var(--text-muted)' }}>CURRENT ANSWER</h3>
-                <button
-                  className="btn btn-secondary"
-                  style={{ padding: '8px 16px', fontSize: 13 }}
-                  onClick={toggleListening}
-                  disabled={isProcessing || interviewComplete}
-                >
-                  {isListening ? '⏹ Stop' : '🎤 Speak'}
-                </button>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  {sttStatus && (
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 180, textAlign: 'right', lineHeight: 1.3 }}>
+                      {isTranscribing ? '⏳' : isListening ? '🔴' : ''} {sttStatus}
+                    </span>
+                  )}
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: '8px 16px', fontSize: 13 }}
+                    onClick={toggleListening}
+                    disabled={isProcessing || interviewComplete || isTranscribing}
+                  >
+                    {isListening ? '⏹ Stop' : '🎤 Speak'}
+                  </button>
+                </div>
               </div>
               <div
                 style={{
@@ -483,14 +571,31 @@ export default function Interview() {
               >
                 {transcript || 'Click "Speak" and start answering...'}
               </div>
-              <button
-                className="btn btn-primary"
-                style={{ width: '100%' }}
-                onClick={submitAnswer}
-                disabled={!canSubmit}
-              >
-                {isProcessing ? 'Submitting...' : 'Submit Answer'}
-              </button>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <button
+                  className="btn btn-primary"
+                  style={{ flex: 1 }}
+                  onClick={submitAnswer}
+                  disabled={!canSubmit || isTranscribing}
+                >
+                  {isProcessing ? 'Submitting...' : isTranscribing ? 'Enhancing transcription...' : 'Submit Answer'}
+                </button>
+                {transcriptionConfidence > 0 && (
+                  <div
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: 8,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      background: transcriptionConfidence >= 70 ? 'rgba(0,212,170,0.15)' : transcriptionConfidence >= 45 ? 'rgba(255,217,61,0.15)' : 'rgba(255,107,157,0.15)',
+                      color: transcriptionConfidence >= 70 ? 'var(--accent-2)' : transcriptionConfidence >= 45 ? 'var(--accent-4)' : 'var(--accent-3)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    STT: {transcriptionConfidence}%
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

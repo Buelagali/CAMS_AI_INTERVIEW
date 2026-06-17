@@ -6,6 +6,7 @@ const { analyzeFrame } = require('../services/visionService');
 const { calculateScore } = require('../services/scoringService');
 const { fuseFeatures } = require('../utils/crossAttentionFusion');
 const { getSkillGraphScore } = require('../utils/skillGraph');
+const { processWavBuffer } = require('../services/transcriptionService');
 
 const sessions = {};
 
@@ -192,6 +193,50 @@ exports.submitAudioChunk = async (req, res) => {
     res.json({ analysis });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+};
+
+exports.transcribeAudio = async (req, res) => {
+  try {
+    let audioBuffer;
+
+    if (req.file && req.file.buffer) {
+      audioBuffer = req.file.buffer;
+    } else if (req.body && req.body.audio) {
+      audioBuffer = Buffer.from(req.body.audio, 'base64');
+    } else if (req.body && req.body._buf) {
+      audioBuffer = Buffer.from(req.body._buf);
+    } else {
+      return res.status(400).json({ error: 'No audio data provided' });
+    }
+
+    if (audioBuffer.length < 100) {
+      return res.status(400).json({ error: 'Audio too short' });
+    }
+
+    const options = {
+      noiseReductionStrength: req.body.noiseReductionStrength || 0.5,
+      language: req.body.language || 'en',
+    };
+
+    const result = await processWavBuffer(audioBuffer, options);
+
+    if (result.error) {
+      return res.status(422).json({ error: result.error, text: result.text || '', confidence: 0 });
+    }
+
+    res.json({
+      text: result.text,
+      segments: result.segments,
+      confidence: result.confidence,
+      duration: result.duration,
+      wordCount: result.wordCount,
+      processingTime: result.processingTime,
+      model: result.model,
+    });
+  } catch (err) {
+    console.error('Transcription error:', err.message);
+    res.status(500).json({ error: `Transcription failed: ${err.message}`, text: '', confidence: 0 });
   }
 };
 
