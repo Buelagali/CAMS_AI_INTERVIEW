@@ -1,13 +1,17 @@
-const DIFFICULTY = { BEGINNER: 1, INTERMEDIATE: 2, ADVANCED: 3, EXPERT: 4 };
+const { pipeline } = require('@xenova/transformers');
+const { getSkillGraphScore, getSkillRecommendations } = require('../utils/skillGraph');
+const { evaluateAnswer, getEmbedding, getSimilarity } = require('./bertService');
 
+const DIFFICULTY = { BEGINNER: 1, INTERMEDIATE: 2, ADVANCED: 3, EXPERT: 4 };
+const DIFFICULTY_LABEL = { 1: 'beginner', 2: 'intermediate', 3: 'advanced', 4: 'expert' };
 const QUESTION_TYPES = ['hr', 'technical', 'resume', 'behavioral', 'adaptive'];
 
 const ROLE_SKILLS = {
-  'Software Developer': ['JavaScript', 'React', 'Node.js', 'TypeScript', 'Git', 'REST', 'SQL', 'Docker', 'System Design', 'DSA'],
+  'Software Developer': ['JavaScript', 'React', 'Node.js', 'TypeScript', 'Git', 'REST', 'SQL', 'Docker', 'System Design'],
   'AI/ML Engineer': ['Python', 'Machine Learning', 'Deep Learning', 'NLP', 'TensorFlow', 'PyTorch', 'scikit-learn', 'Statistics', 'MLOps', 'Computer Vision'],
-  'Data Analyst': ['SQL', 'Python', 'Excel', 'Tableau', 'Power BI', 'Statistics', 'R', 'Data Visualization', 'ETL', 'MongoDB'],
-  'Cloud Engineer': ['AWS', 'Azure', 'GCP', 'Docker', 'Kubernetes', 'Terraform', 'Jenkins', 'Linux', 'CI/CD', 'Networking'],
-  'Cyber Security Analyst': ['Network Security', 'Cryptography', 'Penetration Testing', 'SIEM', 'Linux', 'Firewall', 'Incident Response', 'Risk Assessment', 'Compliance', 'Python'],
+  'Data Analyst': ['SQL', 'Python', 'Excel', 'Tableau', 'Power BI', 'Statistics', 'R', 'Data Visualization', 'ETL'],
+  'Cloud Engineer': ['AWS', 'Azure', 'GCP', 'Docker', 'Kubernetes', 'Terraform', 'Jenkins', 'Linux', 'CI/CD'],
+  'Cyber Security Analyst': ['Network Security', 'Cryptography', 'Penetration Testing', 'SIEM', 'Linux', 'Firewall', 'Incident Response', 'Risk Assessment', 'Compliance'],
 };
 
 const HR_QUESTIONS = [
@@ -165,40 +169,24 @@ const TECHNICAL_QUESTIONS = {
       { id: 'ml_py_2', difficulty: 2, text: 'Explain list comprehensions and generators in Python.' },
       { id: 'ml_py_3', difficulty: 3, text: 'How do you optimize Python code for performance in ML pipelines?' },
       { id: 'ml_py_4', difficulty: 4, text: 'Explain Python decorators and metaclasses with ML use cases.' },
-      { id: 'ml_py_5', difficulty: 1, text: 'How do you manage Python virtual environments and dependencies?' },
-      { id: 'ml_py_6', difficulty: 2, text: 'Explain NumPy broadcasting and vectorization for performance.' },
-      { id: 'ml_py_7', difficulty: 3, text: 'How do you profile and optimize Python memory usage?' },
-      { id: 'ml_py_8', difficulty: 4, text: 'Design a Python-based distributed computing solution using Dask or Ray.' },
     ],
     'Machine Learning': [
       { id: 'ml_ml_1', difficulty: 1, text: 'What is the difference between supervised and unsupervised learning?' },
       { id: 'ml_ml_2', difficulty: 2, text: 'Explain the bias-variance tradeoff in machine learning.' },
       { id: 'ml_ml_3', difficulty: 3, text: 'How do you handle imbalanced datasets in classification?' },
       { id: 'ml_ml_4', difficulty: 4, text: 'Explain ensemble methods and when to use bagging vs boosting.' },
-      { id: 'ml_ml_5', difficulty: 1, text: 'What is cross-validation and why is it important?' },
-      { id: 'ml_ml_6', difficulty: 2, text: 'Explain regularization techniques: L1, L2, and Elastic Net.' },
-      { id: 'ml_ml_7', difficulty: 3, text: 'How do you perform feature selection and dimensionality reduction?' },
-      { id: 'ml_ml_8', difficulty: 4, text: 'Design an automated hyperparameter optimization pipeline.' },
     ],
     'Deep Learning': [
       { id: 'ml_dl_1', difficulty: 1, text: 'What is a neural network and how does it learn?' },
       { id: 'ml_dl_2', difficulty: 2, text: 'Explain backpropagation and gradient descent.' },
       { id: 'ml_dl_3', difficulty: 3, text: 'What is overfitting in deep learning and how do you prevent it?' },
       { id: 'ml_dl_4', difficulty: 4, text: 'Explain transformers and self-attention mechanisms in detail.' },
-      { id: 'ml_dl_5', difficulty: 1, text: 'What are activation functions and which ones are commonly used?' },
-      { id: 'ml_dl_6', difficulty: 2, text: 'Explain batch normalization, layer normalization, and when to use each.' },
-      { id: 'ml_dl_7', difficulty: 3, text: 'How do you implement transfer learning and fine-tuning?' },
-      { id: 'ml_dl_8', difficulty: 4, text: 'Design a distributed training strategy for large language models.' },
     ],
     NLP: [
       { id: 'ml_nlp_1', difficulty: 1, text: 'What is NLP and what are common NLP tasks?' },
       { id: 'ml_nlp_2', difficulty: 2, text: 'Explain word embeddings like Word2Vec and GloVe.' },
       { id: 'ml_nlp_3', difficulty: 3, text: 'How do transformer models like BERT work for NLP?' },
       { id: 'ml_nlp_4', difficulty: 4, text: 'Compare encoder-only, decoder-only, and encoder-decoder transformer architectures.' },
-      { id: 'ml_nlp_5', difficulty: 1, text: 'What is tokenization and what are common tokenization algorithms?' },
-      { id: 'ml_nlp_6', difficulty: 2, text: 'Explain sequence-to-sequence models and attention mechanisms.' },
-      { id: 'ml_nlp_7', difficulty: 3, text: 'How do you fine-tune a pre-trained language model for a specific task?' },
-      { id: 'ml_nlp_8', difficulty: 4, text: 'Design a multilingual NLP pipeline for low-resource languages.' },
     ],
     TensorFlow: [
       { id: 'ml_tf_1', difficulty: 1, text: 'What is TensorFlow and how does it compare to PyTorch?' },
@@ -427,7 +415,19 @@ const RESUME_TEMPLATES = [
   { id: 'res_exp_1', type: 'resume', difficulty: 2, template: 'Your resume mentions {exp} years of experience. How has your approach to development evolved over this time?' },
   { id: 'res_proj_1', type: 'resume', difficulty: 2, template: 'Tell me more about your project involving {skill}. What was your specific role and contribution?' },
   { id: 'res_proj_2', type: 'resume', difficulty: 3, template: 'What technical challenges did you face in your project with {skill}, and how did you overcome them?' },
-  { id: 'res_gap_1', type: 'adaptive', difficulty: 2, template: 'I notice you have experience with {skill}. How does this relate to {missingSkill}, which is important for this role?' },
+  { id: 'res_gap_1', type: 'adaptive', difficulty: 2, template: 'I notice you have experience with {skill}. How does this relate to other technologies important for this role?' },
+  { id: 'res_skill_5', type: 'resume', difficulty: 1, template: 'Can you walk me through how you learned {skill} and what resources you used?' },
+  { id: 'res_skill_6', type: 'resume', difficulty: 2, template: 'How do you stay current with updates and best practices in {skill}?' },
+  { id: 'res_skill_7', type: 'resume', difficulty: 3, template: 'Describe a time when your expertise in {skill} directly impacted a project outcome.' },
+  { id: 'res_skill_8', type: 'resume', difficulty: 4, template: 'How would you teach {skill} to a junior developer on your team?' },
+  { id: 'res_proj_3', type: 'resume', difficulty: 3, template: 'Looking at your experience with {skill}, how would you apply it to solve a problem in a different domain?' },
+  { id: 'res_proj_4', type: 'resume', difficulty: 2, template: 'What metrics or outcomes did you achieve in your project using {skill}?' },
+  { id: 'res_exp_2', type: 'resume', difficulty: 3, template: 'Your resume shows experience with {skill}. Can you describe a situation where you had to choose between {skill} and an alternative?' },
+  { id: 'res_comb_1', type: 'resume', difficulty: 3, template: 'How does your experience with {skill} complement the other technologies listed on your resume?' },
+  { id: 'res_gap_2', type: 'adaptive', difficulty: 3, template: 'Given your background in {skill}, how would you approach learning {missingSkill} which is important for this role?' },
+  { id: 'res_gap_3', type: 'adaptive', difficulty: 4, template: 'Your resume shows strong {skill} skills. How would you leverage that to bridge the gap in {missingSkill}?' },
+  { id: 'res_lead_1', type: 'resume', difficulty: 3, template: 'Have you led a team working with {skill}? Describe your leadership approach.' },
+  { id: 'res_fail_1', type: 'resume', difficulty: 4, template: 'Tell me about a project where {skill} was not the right choice, and what you learned from that experience.' },
 ];
 
 const ADAPTIVE_QUESTIONS = [
@@ -435,15 +435,86 @@ const ADAPTIVE_QUESTIONS = [
   { id: 'adap_2', difficulty: 3, type: 'adaptive', text: 'Building on your previous answer, how would you handle {scenario}?' },
   { id: 'adap_3', difficulty: 2, type: 'adaptive', text: 'Can you provide a specific example of when you applied {keyword} in practice?' },
   { id: 'adap_4', difficulty: 4, type: 'adaptive', text: 'Given your experience with {keyword}, how would you design a system to handle edge cases?' },
+  { id: 'adap_5', difficulty: 1, type: 'adaptive', text: 'You touched on {keyword}. Could you explain the basics of how it works?' },
+  { id: 'adap_6', difficulty: 3, type: 'adaptive', text: 'Your answer mentioned {keyword}. What alternatives did you consider and why?' },
+  { id: 'adap_7', difficulty: 2, type: 'adaptive', text: 'How does {keyword} compare to other approaches you have used in similar situations?' },
+  { id: 'adap_8', difficulty: 4, type: 'adaptive', text: 'Based on your response, how would you scale {keyword} to handle enterprise-level requirements?' },
+  { id: 'adap_9', difficulty: 2, type: 'adaptive', text: 'What trade-offs did you consider when implementing {keyword}?' },
+  { id: 'adap_10', difficulty: 3, type: 'adaptive', text: 'You mentioned {scenario}. What metrics would you use to measure success in that context?' },
+  { id: 'adap_11', difficulty: 1, type: 'adaptive', text: 'What resources or documentation helped you learn about {keyword}?' },
+  { id: 'adap_12', difficulty: 4, type: 'adaptive', text: 'How would you troubleshoot a production issue related to {keyword} under time pressure?' },
+  { id: 'adap_13', difficulty: 3, type: 'adaptive', text: 'Your answer suggests experience with {keyword}. How do you stay updated on its evolution?' },
+  { id: 'adap_14', difficulty: 2, type: 'adaptive', text: 'Can you think of a {scenario} where {keyword} would not be the best approach?' },
+  { id: 'adap_15', difficulty: 4, type: 'adaptive', text: 'Design a testing strategy for a system that relies heavily on {keyword}.' },
 ];
 
 const SCENARIOS = {
-  'Software Developer': 'a high-traffic e-commerce platform experiencing performance issues',
-  'AI/ML Engineer': 'deploying a model that needs to scale to millions of predictions per day',
-  'Data Analyst': 'analyzing a dataset with missing values and outliers to derive business insights',
-  'Cloud Engineer': 'migrating a legacy on-premise system to the cloud with zero downtime',
-  'Cyber Security Analyst': 'responding to a suspected data breach with potential data exfiltration',
+  'Software Developer': [
+    'a high-traffic e-commerce platform experiencing performance issues',
+    'a microservices migration with zero downtime requirement',
+    'a real-time collaborative editor like Google Docs',
+    'a CI/CD pipeline failing intermittently in production',
+    'a legacy codebase that needs modernization without breaking existing features',
+  ],
+  'AI/ML Engineer': [
+    'deploying a model that needs to scale to millions of predictions per day',
+    'a production ML model showing significant data drift',
+    'building a recommendation system with cold-start problem',
+    'implementing MLOps for a team with no prior DevOps experience',
+    'optimizing a deep learning pipeline for edge device deployment',
+  ],
+  'Data Analyst': [
+    'analyzing a dataset with missing values and outliers to derive business insights',
+    'building a real-time dashboard for executive decision-making',
+    'designing an A/B testing framework with multiple concurrent experiments',
+    'creating a data quality monitoring system for streaming data pipelines',
+    'performing a root cause analysis on a sudden drop in key metrics',
+  ],
+  'Cloud Engineer': [
+    'migrating a legacy on-premise system to the cloud with zero downtime',
+    'designing a multi-cloud disaster recovery strategy',
+    'optimizing cloud costs for a rapidly growing SaaS platform',
+    'implementing compliance controls for financial services in the cloud',
+    'building a self-healing infrastructure for a global application',
+  ],
+  'Cyber Security Analyst': [
+    'responding to a suspected data breach with potential data exfiltration',
+    'implementing zero-trust architecture for a remote-first organization',
+    'conducting a post-mortem after a ransomware attack',
+    'building a security awareness program that reduces phishing incidents',
+    'designing a threat-hunting program for detecting advanced persistent threats',
+  ],
 };
+
+let textGenerator = null;
+let textGenLoading = false;
+let textGenResolvers = [];
+
+async function getTextGenerator() {
+  if (textGenerator) return textGenerator;
+  if (textGenLoading) {
+    return new Promise((resolve) => {
+      textGenResolvers.push(resolve);
+    });
+  }
+  textGenLoading = true;
+  try {
+    textGenerator = await Promise.race([
+      pipeline('text-generation', 'Xenova/phi-3-mini-4k-instruct', { quantized: true }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Model load timeout')), 20000)),
+    ]);
+    textGenLoading = false;
+    textGenResolvers.forEach((r) => r(textGenerator));
+    textGenResolvers = [];
+    return textGenerator;
+  } catch (err) {
+    textGenLoading = false;
+    textGenResolvers.forEach((r) => r(null));
+    textGenResolvers = [];
+    console.warn('Phi-3-mini not available, using template fallback:', err.message);
+    return null;
+  }
+}
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -458,337 +529,394 @@ function shuffleArray(arr) {
   return a;
 }
 
-function getDifficultyFromScores(scores) {
-  const avgScore = (
-    (scores.technical || 0) +
-    (scores.semantic || 0) +
-    (scores.confidence || 0)
-  ) / 3;
+function determineDifficulty(state) {
+  const { scores, currentDifficulty, answerHistory } = state;
+  const recentAnswers = answerHistory.slice(-3);
+  const avgRecent = recentAnswers.length > 0
+    ? recentAnswers.reduce((s, a) => s + a.score, 0) / recentAnswers.length
+    : 0;
 
-  if (avgScore > 80) return DIFFICULTY.EXPERT;
-  if (avgScore > 60) return DIFFICULTY.ADVANCED;
-  if (avgScore > 40) return DIFFICULTY.INTERMEDIATE;
-  return DIFFICULTY.BEGINNER;
-}
+  const compositeScore = avgRecent > 0
+    ? avgRecent
+    : (scores.semantic + scores.technical + scores.confidence) / 3;
 
-function getNextQuestionType(interviewMemory) {
-  const { askedQuestions, questionCount } = interviewMemory;
-  const maxQuestions = 8;
-
-  if (questionCount === 0) return 'hr';
-  if (questionCount === 1) return 'resume';
-  if (questionCount === maxQuestions - 1) return 'hr';
-
-  const typeCount = {};
-  QUESTION_TYPES.forEach((t) => { typeCount[t] = 0; });
-  askedQuestions.forEach((q) => {
-    if (typeCount[q.type] !== undefined) typeCount[q.type]++;
-  });
-
-  const shuffled = shuffleArray(QUESTION_TYPES.slice());
-  const leastAsked = shuffled.sort((a, b) => typeCount[a] - typeCount[b]);
-  return leastAsked[0];
-}
-
-function generateResumeQuestion(resumeSkills, difficulty, askedTexts) {
-  if (!resumeSkills || resumeSkills.length === 0) return null;
-
-  const availableSkills = resumeSkills;
-  const shuffled = shuffleArray(availableSkills);
-
-  for (const skill of shuffled) {
-    const candidates = RESUME_TEMPLATES.filter(
-      (t) => t.difficulty === difficulty && !askedTexts.has((t.template || '').toLowerCase().trim())
-    );
-    if (candidates.length === 0) continue;
-
-    const template = pickRandom(candidates);
-    const text = template.template
-      .replace('{skill}', skill)
-      .replace('{exp}', 'several');
-    return {
-      id: template.id + '_' + skill.toLowerCase().replace(/\s+/g, '_'),
-      type: template.type,
-      difficulty,
-      text,
-      source: 'resume',
-      skill,
-    };
+  if (compositeScore > 75) return Math.min(DIFFICULTY.ADVANCED, currentDifficulty + 1);
+  if (compositeScore < 50 && currentDifficulty > DIFFICULTY.BEGINNER) {
+    return currentDifficulty - 1;
   }
+  return currentDifficulty;
+}
+
+function selectTargetSkill(state) {
+  const { role, resumeSkills, answerHistory, skillGaps } = state;
+
+  if (skillGaps && skillGaps.length > 0) {
+    const unansweredGaps = skillGaps.filter((gap) =>
+      !answerHistory.some((a) =>
+        (a.skill && gap.toLowerCase().includes(a.skill.toLowerCase())) ||
+        a.text.toLowerCase().includes(gap.toLowerCase())
+      )
+    );
+    if (unansweredGaps.length > 0) {
+      return unansweredGaps[Math.floor(Math.random() * unansweredGaps.length)];
+    }
+  }
+
+  const lowScoreAnswers = answerHistory
+    .filter((a) => a.score < 50 && a.skill)
+    .sort((a, b) => a.score - b.score);
+  if (lowScoreAnswers.length > 0) {
+    return lowScoreAnswers[0].skill;
+  }
+
+  const recs = getSkillRecommendations(resumeSkills || [], role);
+  if (recs.nextSkills && recs.nextSkills.length > 0) {
+    return recs.nextSkills[Math.floor(Math.random() * recs.nextSkills.length)];
+  }
+
   return null;
 }
 
-function generateAdaptiveQuestion(interviewMemory, difficulty, askedTexts) {
-  const { answers } = interviewMemory;
-  if (!answers || answers.length === 0) return null;
+function buildCandidateContext(state) {
+  const { role, resumeSkills, answerHistory, skillGaps } = state;
+  const parts = [`Role: ${role}`];
 
-  const lastAnswer = answers[answers.length - 1];
-  const words = (lastAnswer.answer || '').split(' ').filter((w) => w.length > 4);
-  const techWords = ['react', 'node', 'python', 'api', 'database', 'cloud', 'docker', 'aws', 'ml', 'ai', 'algorithm', 'framework', 'system', 'design', 'test', 'deploy', 'pipeline', 'model', 'data', 'server'];
-  const matched = words.filter((w) => techWords.some((t) => w.toLowerCase().includes(t)));
+  if (resumeSkills && resumeSkills.length > 0) {
+    parts.push(`Candidate skills: ${resumeSkills.join(', ')}`);
+  }
+  if (skillGaps && skillGaps.length > 0) {
+    parts.push(`Skill gaps to assess: ${skillGaps.join(', ')}`);
+  }
+  if (answerHistory.length > 0) {
+    const last = answerHistory[answerHistory.length - 1];
+    parts.push(`Last answer score: ${last.score}/100 on topic: ${last.skill || 'general'}`);
+    if (answerHistory.length >= 2) {
+      const trend = answerHistory.slice(-3).map((a) => a.score);
+      parts.push(`Recent performance trend: ${trend.join(', ')}`);
+    }
+  }
+  return parts.join('. ');
+}
 
-  const keyword = matched.length > 0 ? pickRandom(matched) : 'your approach';
-  const scenario = SCENARIOS[interviewMemory.role] || 'a complex technical challenge';
+function buildQuestionHistory(state) {
+  return state.answerHistory
+    .map((a, i) => `${i + 1}. "${a.text.substring(0, 80)}" (score: ${a.score})`)
+    .join('\n');
+}
 
-  const candidates = ADAPTIVE_QUESTIONS.filter(
-    (q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
-  );
-  if (candidates.length === 0) return null;
+function selectQuestionType(state) {
+  const { answerHistory } = state;
+  const typeCount = {};
+  QUESTION_TYPES.forEach((t) => { typeCount[t] = 0; });
+  answerHistory.forEach((a) => {
+    if (typeCount[a.type] !== undefined) typeCount[a.type]++;
+  });
 
-  const template = pickRandom(candidates);
-  return {
-    id: template.id + '_' + Date.now(),
-    type: 'adaptive',
-    difficulty: template.difficulty,
-    text: template.text.replace('{keyword}', keyword).replace('{scenario}', scenario),
-    source: 'adaptive',
+  const types = shuffleArray(QUESTION_TYPES.slice());
+  const sorted = types.sort((a, b) => typeCount[a] - typeCount[b]);
+  return sorted[0];
+}
+
+async function generateWithLLM(state, difficulty, targetSkill, questionType) {
+  const generator = await getTextGenerator();
+  if (!generator) return null;
+
+  const candidateContext = buildCandidateContext(state);
+  const questionHistory = buildQuestionHistory(state);
+  const diffLabel = DIFFICULTY_LABEL[difficulty] || 'intermediate';
+
+  const typeGuide = {
+    technical: `Assess the candidate's knowledge of "${targetSkill || 'core concepts'}"`,
+    behavioral: `Ask about a real scenario where they applied "${targetSkill || 'relevant skills'}"`,
+    resume: `Ask them to elaborate on their experience with "${targetSkill || 'a listed skill'}" from their resume`,
+    adaptive: `Build on their previous answer and probe deeper into "${targetSkill || 'the topic they discussed'}"`,
   };
+
+  const prompt = `<|user|>You are an expert technical interviewer. Generate a single ${diffLabel}-level ${questionType} interview question for a ${state.role} candidate.
+
+Context: ${candidateContext}
+
+${typeGuide[questionType] || typeGuide.technical}.
+
+Previous questions asked (DO NOT repeat these):
+${questionHistory || 'None yet'}
+
+Constraints:
+- Question must be ${diffLabel} difficulty (${difficulty === 1 ? 'basic/foundational concepts' : difficulty === 2 ? 'applied knowledge requiring examples' : 'complex/system-level thinking requiring deep expertise'})
+- Must be different from all previous questions
+- Must be a single clear question, no bullet points
+- Do not prefix with anything, just output the question
+<|end|>
+<|assistant|>`;
+
+  try {
+    const result = await generator(prompt, {
+      max_new_tokens: 100,
+      temperature: 0.8,
+      top_p: 0.9,
+      do_sample: true,
+    });
+    let text = result[0]?.generated_text || '';
+    text = text.split('<|assistant|>')[1] || text;
+    text = text.replace(/["""]/g, '').trim();
+    if (!text || text.length < 10) return null;
+    return text;
+  } catch (err) {
+    console.warn('LLM generation failed:', err.message);
+    return null;
+  }
 }
 
-function generateTechnicalQuestion(role, difficulty, askedTexts, preferredSkill) {
+function generateFromOriginalBanks(state, difficulty, targetSkill, questionType) {
+  const askedTexts = new Set(state.answerHistory.map((a) => (a.text || '').toLowerCase().trim()));
+  const { role, resumeSkills, answerHistory } = state;
+
   const roleQuestions = TECHNICAL_QUESTIONS[role];
-  if (!roleQuestions) return null;
-
-  let available = [];
-  const skillKeys = Object.keys(roleQuestions);
-
-  if (preferredSkill && roleQuestions[preferredSkill]) {
-    const fromSkill = roleQuestions[preferredSkill].filter(
-      (q) => q.difficulty === difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
-    );
-    if (fromSkill.length > 0) available = fromSkill;
-  }
-
-  if (available.length === 0) {
-    const shuffledSkills = shuffleArray(skillKeys);
-    for (const skill of shuffledSkills) {
-      const fromSkill = roleQuestions[skill].filter(
-        (q) => q.difficulty === difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
-      );
-      if (fromSkill.length > 0) { available = fromSkill; break; }
-    }
-  }
-
-  if (available.length === 0) {
-    const oneUp = Math.min(difficulty + 1, 4);
-    const oneDown = Math.max(difficulty - 1, 1);
-    const shuffled = shuffleArray(skillKeys);
-    for (const skill of shuffled) {
-      for (const d of [oneUp, oneDown, difficulty]) {
-        const fromSkill = roleQuestions[skill].filter(
-          (q) => q.difficulty === d && !askedTexts.has((q.text || '').toLowerCase().trim())
-        );
-        if (fromSkill.length > 0) { available = fromSkill; break; }
-      }
-      if (available.length > 0) break;
-    }
-  }
-
-  if (available.length === 0) return null;
-  return { ...pickRandom(available), type: 'technical', source: 'technical' };
-}
-
-function generateHRQuestion(difficulty, askedTexts) {
-  const candidates = HR_QUESTIONS.filter(
-    (q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
-  );
-  if (candidates.length === 0) return null;
-  return { ...pickRandom(candidates), type: 'hr', source: 'hr' };
-}
-
-function generateBehavioralQuestion(difficulty, askedTexts) {
-  const candidates = BEHAVIORAL_QUESTIONS.filter(
-    (q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
-  );
-  if (candidates.length === 0) return null;
-  return { ...pickRandom(candidates), type: 'behavioral', source: 'behavioral' };
-}
-
-export function generateQuestion({ role, resumeSkills, interviewMemory, currentEmotion }) {
-  const { askedQuestions, scores, questionCount } = interviewMemory;
-  const askedTexts = new Set(askedQuestions.map((q) => (q.text || '').toLowerCase().trim()));
-
-  if (questionCount >= 8) return null;
-
-  let difficulty = getDifficultyFromScores(scores);
-
-  if (currentEmotion === 'Nervous' || currentEmotion === 'Sad' || currentEmotion === 'Angry') {
-    difficulty = Math.max(1, difficulty - 1);
-  }
-
-  const questionType = getNextQuestionType(interviewMemory);
-
-  let question = null;
+  const skillKeys = roleQuestions ? Object.keys(roleQuestions) : [];
 
   switch (questionType) {
-    case 'hr':
-      question = generateHRQuestion(difficulty, askedTexts);
+    case 'hr': {
+      const candidates = HR_QUESTIONS.filter((q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim()));
+      if (candidates.length === 0) break;
+      const q = pickRandom(candidates);
+      return { id: q.id + '_' + Date.now(), type: 'hr', difficulty, text: q.text, metadata: { skill: null, source: 'hr' } };
+    }
+
+    case 'behavioral': {
+      const candidates = BEHAVIORAL_QUESTIONS.filter((q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim()));
+      if (candidates.length === 0) break;
+      const q = pickRandom(candidates);
+      return { id: q.id + '_' + Date.now(), type: 'behavioral', difficulty, text: q.text, metadata: { skill: null, source: 'behavioral' } };
+    }
+
+    case 'resume': {
+      if (!resumeSkills || resumeSkills.length === 0) break;
+      const shuffledSkills = shuffleArray(resumeSkills);
+      for (const skill of shuffledSkills) {
+        const candidates = RESUME_TEMPLATES.filter((t) => t.difficulty === difficulty && !askedTexts.has((t.template || '').toLowerCase().trim()));
+        if (candidates.length === 0) continue;
+        const template = pickRandom(candidates);
+        const missingSkills = state.skillGaps || [];
+        const missingSkill = missingSkills.length > 0 ? missingSkills[Math.floor(Math.random() * missingSkills.length)] : 'advanced concepts';
+        const text = template.template
+          .replace('{skill}', skill)
+          .replace('{exp}', 'several')
+          .replace('{missingSkill}', missingSkill);
+        return { id: template.id + '_' + skill.toLowerCase().replace(/\s+/g, '_'), type: 'resume', difficulty, text, metadata: { skill, source: 'resume' } };
+      }
       break;
-    case 'resume':
-      question = generateResumeQuestion(resumeSkills, difficulty, askedTexts);
-      if (!question) question = generateTechnicalQuestion(role, difficulty, askedTexts, null);
-      break;
-    case 'behavioral':
-      question = generateBehavioralQuestion(difficulty, askedTexts);
-      if (!question) question = generateHRQuestion(difficulty, askedTexts);
-      break;
-    case 'adaptive':
-      question = generateAdaptiveQuestion(interviewMemory, difficulty, askedTexts);
-      if (!question) question = generateBehavioralQuestion(difficulty, askedTexts);
-      break;
+    }
+
+    case 'adaptive': {
+      if (!answerHistory || answerHistory.length === 0) break;
+      const lastAnswer = answerHistory[answerHistory.length - 1];
+      const words = (lastAnswer.text || '').split(' ').filter((w) => w.length > 4);
+      const techWords = ['react', 'node', 'python', 'api', 'database', 'cloud', 'docker', 'aws', 'ml', 'ai', 'algorithm', 'framework', 'system', 'design', 'test', 'deploy', 'pipeline', 'model', 'data', 'server'];
+      const matched = words.filter((w) => techWords.some((t) => w.toLowerCase().includes(t)));
+      const keyword = matched.length > 0 ? pickRandom(matched) : 'your approach';
+      const roleScenarios = SCENARIOS[role];
+      const scenario = Array.isArray(roleScenarios) ? pickRandom(roleScenarios) : (roleScenarios || 'a complex technical challenge');
+      const candidates = ADAPTIVE_QUESTIONS.filter((q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim()));
+      if (candidates.length === 0) break;
+      const template = pickRandom(candidates);
+      return { id: template.id + '_' + Date.now(), type: 'adaptive', difficulty: template.difficulty, text: template.text.replace('{keyword}', keyword).replace('{scenario}', scenario), metadata: { keyword, source: 'adaptive' } };
+    }
+
     case 'technical':
     default: {
-      const preferredSkill = resumeSkills && resumeSkills.length > 0
-        ? pickRandom(resumeSkills)
-        : null;
-      question = generateTechnicalQuestion(role, difficulty, askedTexts, preferredSkill);
-      if (!question) question = generateBehavioralQuestion(difficulty, askedTexts);
-      if (!question) question = generateHRQuestion(difficulty, askedTexts);
-      break;
+      if (!roleQuestions || skillKeys.length === 0) break;
+      let available = [];
+      const preferredSkill = targetSkill && roleQuestions[targetSkill] ? targetSkill : null;
+
+      if (preferredSkill && roleQuestions[preferredSkill]) {
+        const fromSkill = roleQuestions[preferredSkill].filter((q) => q.difficulty === difficulty && !askedTexts.has((q.text || '').toLowerCase().trim()));
+        if (fromSkill.length > 0) available = fromSkill;
+      }
+
+      if (available.length === 0) {
+        const shuffled = shuffleArray(skillKeys);
+        for (const skill of shuffled) {
+          const fromSkill = roleQuestions[skill].filter((q) => q.difficulty === difficulty && !askedTexts.has((q.text || '').toLowerCase().trim()));
+          if (fromSkill.length > 0) { available = fromSkill; break; }
+        }
+      }
+
+      if (available.length === 0) {
+        const oneUp = Math.min(difficulty + 1, 4);
+        const oneDown = Math.max(difficulty - 1, 1);
+        const shuffled = shuffleArray(skillKeys);
+        for (const skill of shuffled) {
+          for (const d of [oneUp, oneDown, difficulty]) {
+            const fromSkill = roleQuestions[skill].filter((q) => q.difficulty === d && !askedTexts.has((q.text || '').toLowerCase().trim()));
+            if (fromSkill.length > 0) { available = fromSkill; break; }
+          }
+          if (available.length > 0) break;
+        }
+      }
+
+      if (available.length === 0) break;
+      const q = pickRandom(available);
+      return { id: q.id + '_' + Date.now(), type: 'technical', difficulty, text: q.text, metadata: { skill: targetSkill || skillKeys[0], source: 'technical' } };
     }
   }
 
-  if (!question) {
-    question = {
-      id: 'fallback_' + Date.now(),
-      type: 'technical',
-      difficulty: 1,
-      text: 'Can you describe a technical project you have worked on recently?',
-      source: 'fallback',
+  return null;
+}
+
+const FALLBACK_TEXTS = [
+  'Can you describe a technical project you have worked on recently and the challenges you faced?',
+  'What interests you most about the technology you currently work with?',
+  'Tell me about a time you had to solve a difficult problem. What was your approach?',
+  'How do you stay current with developments in your field?',
+  'What is the most impactful project you have worked on and why?',
+  'Describe a situation where you had to collaborate with others to achieve a technical goal.',
+  'What technical skill are you currently trying to improve and why?',
+  'Tell me about a time you had to make a decision with incomplete information.',
+];
+
+const USED_FALLBACKS = new Set();
+
+function textSimilarity(a, b) {
+  const wordsA = new Set(a.toLowerCase().split(/\W+/).filter(Boolean));
+  const wordsB = new Set(b.toLowerCase().split(/\W+/).filter(Boolean));
+  const intersection = new Set([...wordsA].filter((w) => wordsB.has(w)));
+  const union = new Set([...wordsA, ...wordsB]);
+  return union.size === 0 ? 0 : intersection.size / union.size;
+}
+
+async function ensureUniqueness(questionText, state) {
+  if (!state.answerHistory || state.answerHistory.length === 0) return true;
+
+  let embeddingAvailable = true;
+  try {
+    for (const prev of state.answerHistory) {
+      if (prev.text) {
+        const sim = await getSimilarity(questionText, prev.text);
+        if (sim > 0.75) return false;
+      }
+    }
+  } catch {
+    embeddingAvailable = false;
+  }
+
+  if (!embeddingAvailable) {
+    for (const prev of state.answerHistory) {
+      if (prev.text && textSimilarity(questionText, prev.text) > 0.65) return false;
+    }
+  }
+  return true;
+}
+
+async function generateQuestion(state) {
+  const difficulty = determineDifficulty(state);
+  const targetSkill = selectTargetSkill(state);
+
+  const askedTexts = new Set(state.answerHistory.map((a) => a.text.toLowerCase().trim()));
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let text = null;
+    let questionType = null;
+    let source = null;
+
+    if (attempt === 0) {
+      questionType = selectQuestionType(state);
+      text = await generateWithLLM(state, difficulty, targetSkill, questionType);
+      source = 'llm';
+    }
+
+    if (!text) {
+      questionType = selectQuestionType(state);
+      const generated = generateFromOriginalBanks(state, difficulty, targetSkill, questionType);
+      if (generated) {
+        text = generated.text;
+        questionType = generated.type;
+        source = generated.metadata?.source || 'bank';
+
+        const normalized = text.toLowerCase().trim();
+        if (askedTexts.has(normalized)) {
+          text = null;
+          continue;
+        }
+      }
+    }
+
+    if (!text) {
+      const synonyms = ['React', 'Node.js', 'Python', 'Docker', 'AWS', 'APIs', 'databases', 'testing'];
+      const syn = pickRandom(synonyms);
+      const altTexts = [
+        `Can you walk me through how you would approach building a system using ${syn}?`,
+        `What experience do you have with ${syn} and how have you applied it in your work?`,
+        `How would you explain ${syn} to someone new to the field?`,
+        `What are common pitfalls when working with ${syn} and how do you avoid them?`,
+      ];
+      text = pickRandom(altTexts);
+      source = 'alt-fallback';
+    }
+
+    if (!text) {
+      text = FALLBACK_TEXTS[attempt % FALLBACK_TEXTS.length];
+      source = 'fallback';
+    }
+
+    const normalized = text.toLowerCase().trim();
+    if (askedTexts.has(normalized)) continue;
+
+    const isUnique = await ensureUniqueness(text, state);
+    if (!isUnique) continue;
+
+    const questionId = `adap_${Date.now()}_${attempt}`;
+
+    return {
+      id: questionId,
+      type: questionType || 'technical',
+      difficulty,
+      text,
+      metadata: {
+        skill: targetSkill || null,
+        rationale: difficulty > state.currentDifficulty
+          ? 'Increasing difficulty based on strong performance'
+          : difficulty < state.currentDifficulty
+            ? 'Reinforcing foundational concepts'
+            : 'Continuing at current difficulty level',
+        followUpTo: state.answerHistory.length > 0
+          ? state.answerHistory[state.answerHistory.length - 1].questionId || null
+          : null,
+        generationMethod: source,
+      },
     };
   }
 
-  return question;
-}
-
-export function fetchAdaptiveQuestion(sessionId) {
-  return fetch(`/api/interview/session/${sessionId}/next-question`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  }).then((res) => {
-    if (!res.ok) throw new Error('Failed to fetch adaptive question');
-    return res.json();
-  });
-}
-
-export function calculateAnswerScore({ questionText, answerText, questionType, difficulty, emotionState, confidenceScore }) {
-  const answerWords = answerText.toLowerCase().split(' ').filter(Boolean);
-  const questionWords = questionText.toLowerCase().split(' ').filter(Boolean);
-  const wordOverlap = questionWords.filter((w) => answerWords.includes(w)).length;
-  const technicalTerms = [
-    'function', 'component', 'state', 'hook', 'api', 'database', 'server', 'client',
-    'algorithm', 'data', 'model', 'train', 'test', 'deploy', 'cloud', 'docker',
-    'pipeline', 'framework', 'library', 'async', 'callback', 'promise', 'event',
-    'class', 'object', 'array', 'loop', 'variable', 'scope', 'closure', 'module',
-    'rest', 'graphql', 'sql', 'nosql', 'cache', 'queue', 'stream', 'socket',
-    'security', 'auth', 'token', 'encrypt', 'hash', 'certificate',
-    'container', 'orchestrate', 'monitor', 'scale', 'load', 'balance',
-  ];
-  const termCount = technicalTerms.filter((t) => answerWords.includes(t)).length;
-  const answerLength = answerWords.length;
-  const lengthScore = Math.min(100, (answerLength / 30) * 100);
-  const overlapScore = Math.min(100, (wordOverlap / Math.max(questionWords.length, 1)) * 100);
-  const technicalDepth = Math.min(100, (termCount / 5) * 100);
-  const confidenceBoost = (confidenceScore || 50) * 0.15;
-  const emotionPenalty = (emotionState === 'Nervous' || emotionState === 'Sad') ? 10 : 0;
-
-  let score = Math.round(
-    overlapScore * 0.25 +
-    lengthScore * 0.20 +
-    technicalDepth * 0.30 +
-    confidenceBoost +
-    Math.random() * 10
-  );
-
-  if (difficulty >= 3) score = Math.min(100, score + 5);
-  if (difficulty >= 4) score = Math.min(100, score + 5);
-
-  score = Math.max(10, Math.min(100, score - emotionPenalty));
-  return score;
-}
-
-export function calculateCommunicationScore(answerText) {
-  const words = answerText.split(' ').filter(Boolean);
-  const sentences = answerText.split(/[.!?]+/).filter((s) => s.trim().length > 0);
-  const avgWordsPerSentence = sentences.length > 0 ? words.length / sentences.length : words.length;
-  const wordLenVariety = words.reduce((sum, w) => sum + w.length, 0) / Math.max(words.length, 1);
-  const fillerWords = ['um', 'uh', 'like', 'basically', 'actually', 'sort of', 'kind of', 'you know', 'i mean'];
-  const fillerCount = fillerWords.filter((fw) => answerText.toLowerCase().includes(fw)).length;
-
-  let score = 60;
-  if (avgWordsPerSentence >= 8 && avgWordsPerSentence <= 25) score += 15;
-  else if (avgWordsPerSentence > 25) score -= 10;
-  if (wordLenVariety >= 4) score += 10;
-  if (fillerCount === 0) score += 10;
-  else if (fillerCount <= 2) score += 5;
-  else score -= 10 * Math.min(5, fillerCount);
-
-  return Math.max(10, Math.min(100, score));
-}
-
-export function calculateConfidenceFromAnswer(answerText, emotionState) {
-  const words = answerText.split(' ').filter(Boolean);
-  const sentences = answerText.split(/[.!?]+/).filter((s) => s.trim().length > 0);
-  const avgWords = sentences.length > 0 ? words.length / sentences.length : words.length;
-  const assertiveWords = ['i think', 'i believe', 'i know', 'i am confident', 'certainly', 'definitely', 'absolutely'];
-  const hesitantWords = ['maybe', 'perhaps', 'i guess', 'not sure', 'probably', 'might', 'could be', 'i dont know'];
-  const assertiveCount = assertiveWords.filter((w) => answerText.toLowerCase().includes(w)).length;
-  const hesitantCount = hesitantWords.filter((w) => answerText.toLowerCase().includes(w)).length;
-
-  let score = 50;
-  if (avgWords >= 10) score += 10;
-  if (words.length >= 30) score += 10;
-  if (assertiveCount > 0) score += 15 * Math.min(3, assertiveCount);
-  if (hesitantCount > 0) score -= 15 * Math.min(3, hesitantCount);
-
-  if (emotionState === 'Confident') score += 15;
-  if (emotionState === 'Happy') score += 10;
-  if (emotionState === 'Nervous') score -= 15;
-
-  return Math.max(10, Math.min(100, score));
-}
-
-export function calculateEmotionStability(emotionScoresHistory) {
-  if (!emotionScoresHistory || emotionScoresHistory.length < 3) return 50;
-
-  const recent = emotionScoresHistory.slice(-10);
-  const fluctuations = [];
-  for (let i = 1; i < recent.length; i++) {
-    const prev = recent[i - 1];
-    const curr = recent[i];
-    if (prev && curr) {
-      const change = Object.keys(curr).reduce((sum, key) => {
-        return sum + Math.abs((curr[key] || 0) - (prev[key] || 0));
-      }, 0);
-      fluctuations.push(change);
-    }
-  }
-
-  const avgFluctuation = fluctuations.reduce((s, v) => s + v, 0) / Math.max(fluctuations.length, 1);
-  const stability = Math.max(0, 100 - avgFluctuation * 50);
-  return Math.round(Math.min(100, stability));
-}
-
-export function createInitialMemory(role, resumeData) {
   return {
-    role,
-    askedQuestions: [],
-    answers: [],
-    scores: { technical: 0, communication: 0, confidence: 0, behavior: 0, semantic: 0, emotion: 0 },
-    questionCount: 0,
-    resumeSkills: resumeData?.skills || [],
-    skillGaps: [],
+    id: `fallback_${Date.now()}`,
+    type: 'technical',
+    difficulty: DIFFICULTY.BEGINNER,
+    text: 'Can you describe a technical project you have worked on recently and the challenges you faced?',
+    metadata: {
+      skill: null,
+      rationale: 'Fallback question after all generation attempts',
+      followUpTo: null,
+      generationMethod: 'fallback',
+    },
   };
 }
 
-export function getSkillGraph(role) {
-  return ROLE_SKILLS[role] || ROLE_SKILLS['Software Developer'];
+function createInitialState({ role, resumeSkills, skillGaps }) {
+  return {
+    role,
+    resumeSkills: resumeSkills || [],
+    skillGaps: skillGaps || [],
+    answerHistory: [],
+    scores: { technical: 0, communication: 0, confidence: 0, semantic: 0 },
+    currentDifficulty: DIFFICULTY.BEGINNER,
+    currentQuestionIndex: 0,
+    maxQuestions: 8,
+  };
 }
 
-export function getMissingSkills(role, resumeSkills) {
-  const required = ROLE_SKILLS[role] || ROLE_SKILLS['Software Developer'];
-  return required.filter(
-    (s) => !resumeSkills.some((rs) => rs.toLowerCase().includes(s.toLowerCase()))
-  );
-}
+module.exports = {
+  generateQuestion,
+  determineDifficulty,
+  selectTargetSkill,
+  createInitialState,
+  DIFFICULTY,
+};

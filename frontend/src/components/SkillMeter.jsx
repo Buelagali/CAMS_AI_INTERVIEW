@@ -31,7 +31,7 @@ export default function SkillMeter({ skills = [], matchedSkills = [], missingSki
           const statusColors = {
             matched: { bg: 'rgba(0, 212, 170, 0.15)', color: 'var(--accent-2)' },
             missing: { bg: 'rgba(255, 107, 157, 0.15)', color: 'var(--accent-3)' },
-            neutral: { bg: 'rgba(255,255,255,0.05)', color: 'var(--text-secondary)' },
+            neutral: { bg: 'rgba(0,0,0,0.04)', color: 'var(--text-secondary)' },
           };
           const colors = statusColors[status];
 

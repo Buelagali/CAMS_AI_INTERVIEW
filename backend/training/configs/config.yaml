@@ -1,0 +1,130 @@
+# CAMS Model Training Configuration
+# Each model section specifies the base model, training parameters,
+# and class labels for fine-tuning.
+
+defaults:
+  output_dir: "./models"
+  data_dir: "./data"
+  logging_dir: "./logs"
+  use_lora: true
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.1
+  num_epochs: 3
+  batch_size: 8
+  learning_rate: 2e-5
+  warmup_steps: 100
+  save_steps: 500
+  eval_steps: 500
+  logging_steps: 10
+
+models:
+  embeddings:
+    name: "all-MiniLM-L6-v2"
+    hf_model_id: "sentence-transformers/all-MiniLM-L6-v2"
+    task: "feature-extraction"
+    enabled: true
+    num_epochs: 5
+    batch_size: 16
+    learning_rate: 3e-5
+    max_length: 128
+    loss: "cosine_similarity"
+    dataset:
+      type: "contrastive_pairs"
+      num_samples: 10000
+      similar_ratio: 0.5
+
+  whisper:
+    name: "whisper-tiny"
+    hf_model_id: "openai/whisper-tiny"
+    task: "automatic-speech-recognition"
+    enabled: true
+    num_epochs: 3
+    batch_size: 4
+    learning_rate: 1e-5
+    max_audio_seconds: 30
+    language: "en"
+    dataset:
+      type: "synthetic_speech"
+      num_samples: 2000
+      sample_rate: 16000
+
+  wav2vec2:
+    name: "wav2vec2-base-superb-ic"
+    hf_model_id: "superb/wav2vec2-base-superb-ic"
+    task: "audio-classification"
+    enabled: true
+    num_epochs: 5
+    batch_size: 8
+    learning_rate: 2e-5
+    max_audio_seconds: 10
+    num_labels: 4
+    id2label:
+      0: "confident"
+      1: "nervous"
+      2: "anxious"
+      3: "neutral"
+    label2id:
+      confident: 0
+      nervous: 1
+      anxious: 2
+      neutral: 3
+    dataset:
+      type: "synthetic_emotion"
+      num_samples: 4000
+
+  vit:
+    name: "vit-base"
+    hf_model_id: "google/vit-base-patch16-224"
+    task: "image-classification"
+    enabled: true
+    num_epochs: 5
+    batch_size: 16
+    learning_rate: 3e-5
+    image_size: 224
+    num_labels: 10
+    id2label:
+      0: "attentive"
+      1: "distracted"
+      2: "engaged"
+      3: "nodding"
+      4: "speaking"
+      5: "listening"
+      6: "thinking"
+      7: "frustrated"
+      8: "confused"
+      9: "interested"
+    dataset:
+      type: "synthetic_frames"
+      num_samples: 5000
+
+  layoutlm:
+    name: "layoutlm-document-qa"
+    hf_model_id: "microsoft/layoutlm-base-uncased"
+    task: "document-question-answering"
+    enabled: true
+    num_epochs: 3
+    batch_size: 4
+    learning_rate: 2e-5
+    max_length: 512
+    dataset:
+      type: "synthetic_resume_qa"
+      num_samples: 2000
+
+  phi3:
+    name: "phi-3-mini"
+    hf_model_id: "microsoft/Phi-3-mini-4k-instruct"
+    task: "text-generation"
+    enabled: false
+    num_epochs: 1
+    batch_size: 1
+    learning_rate: 1e-5
+    max_length: 2048
+    use_lora: true
+    lora_r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    dataset:
+      type: "synthetic_interview_feedback"
+      num_samples: 500
+    note: "Requires HF login for gated model; set enabled=false by default"

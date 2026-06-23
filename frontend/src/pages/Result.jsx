@@ -73,7 +73,7 @@ export default function Result() {
         </p>
         <div style={{ marginTop: 8, display: 'flex', gap: 6, justifyContent: 'center', flexWrap: 'wrap' }}>
           {['Technical', 'Communication', 'Confidence', 'Behavior', 'Emotion Stability', 'Resume Match', 'Project Knowledge', 'Role Match'].map((dim) => (
-            <span key={dim} style={{ padding: '2px 10px', borderRadius: 10, fontSize: 10, background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)' }}>
+            <span key={dim} style={{ padding: '2px 10px', borderRadius: 10, fontSize: 10, background: 'rgba(0,0,0,0.04)', color: 'var(--text-muted)' }}>
               {dim}
             </span>
           ))}
@@ -100,7 +100,7 @@ export default function Result() {
                 <stop offset="100%" stopColor="var(--accent-2)" />
               </linearGradient>
             </defs>
-            <text x="90" y="80" textAnchor="middle" dominantBaseline="central" fill="white" fontSize="36" fontWeight="800">
+            <text x="90" y="80" textAnchor="middle" dominantBaseline="central" fill="var(--text-primary)" fontSize="36" fontWeight="800">
               {scores.overall || 0}%
             </text>
             <text x="90" y="115" textAnchor="middle" dominantBaseline="central" fill="var(--text-secondary)" fontSize="14">
@@ -121,9 +121,9 @@ export default function Result() {
           <h3 style={{ fontSize: 16, marginBottom: 16, color: 'var(--text-secondary)' }}>Score Radar</h3>
           <ResponsiveContainer width="100%" height={300}>
             <RadarChart data={radarData}>
-              <PolarGrid stroke="rgba(255,255,255,0.1)" />
-              <PolarAngleAxis dataKey="metric" tick={{ fill: 'rgba(255,255,255,0.6)', fontSize: 12 }} />
-              <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 10 }} />
+              <PolarGrid stroke="rgba(0,0,0,0.08)" />
+              <PolarAngleAxis dataKey="metric" tick={{ fill: 'var(--text-primary)', fontSize: 12 }} />
+              <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fill: 'var(--text-secondary)', fontSize: 10 }} />
               <Radar name="Score" dataKey="value" stroke="var(--accent-1)" fill="var(--accent-1)" fillOpacity={0.3} />
             </RadarChart>
           </ResponsiveContainer>
@@ -133,11 +133,11 @@ export default function Result() {
           <h3 style={{ fontSize: 16, marginBottom: 16, color: 'var(--text-secondary)' }}>Score Breakdown</h3>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={barData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,0.6)', fontSize: 11 }} angle={-45} textAnchor="end" height={80} />
-              <YAxis domain={[0, 100]} tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 11 }} />
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.07)" />
+              <XAxis dataKey="name" tick={{ fill: 'var(--text-primary)', fontSize: 11 }} angle={-45} textAnchor="end" height={80} />
+              <YAxis domain={[0, 100]} tick={{ fill: 'var(--text-secondary)', fontSize: 11 }} />
               <Tooltip
-                contentStyle={{ background: '#1a1a3a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: 'white' }}
+                contentStyle={{ background: '#ffffff', border: '1px solid rgba(0,0,0,0.1)', borderRadius: 8, color: '#1a1a2e' }}
               />
               <Bar dataKey="score" radius={[6, 6, 0, 0]}>
                 {barData.map((_, idx) => (

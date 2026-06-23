@@ -118,7 +118,7 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
                 style={{
                   flex: 1,
                   height: 4,
-                  background: 'rgba(255,255,255,0.08)',
+                  background: 'rgba(0,0,0,0.05)',
                   borderRadius: 2,
                   overflow: 'hidden',
                 }}
@@ -151,7 +151,7 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
                       <text x={chartPad.left - 4} y={y + 4} textAnchor="end" fontSize={9} fill="var(--text-muted)">
                         {em}
                       </text>
-                      <line x1={chartPad.left} y1={y} x2={chartWidth - chartPad.right} y2={y} stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+                      <line x1={chartPad.left} y1={y} x2={chartWidth - chartPad.right} y2={y} stroke="rgba(0,0,0,0.07)" strokeWidth={1} />
                     </g>
                   );
                 })}
@@ -200,7 +200,7 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
                       const y = 115 - v * 100;
                       return (
                         <g key={v}>
-                          <line x1={40} y1={y} x2={272} y2={y} stroke="rgba(255,255,255,0.06)" strokeWidth={1} />
+                          <line x1={40} y1={y} x2={272} y2={y} stroke="rgba(0,0,0,0.07)" strokeWidth={1} />
                           <text x={36} y={y + 3} textAnchor="end" fontSize={8} fill="var(--text-muted)">{Math.round(v * 100)}%</text>
                         </g>
                       );

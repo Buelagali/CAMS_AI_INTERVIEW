@@ -7,17 +7,26 @@ const { calculateScore } = require('../services/scoringService');
 const { fuseFeatures } = require('../utils/crossAttentionFusion');
 const { getSkillGraphScore } = require('../utils/skillGraph');
 const { processWavBuffer } = require('../services/transcriptionService');
+const adaptiveEngine = require('../services/adaptiveEngine');
 
 const sessions = {};
 
 exports.createSession = (req, res) => {
-  const { name, email, role } = req.body;
+  const { name, email, role, resumeSkills } = req.body;
   const sessionId = uuidv4();
+
+  const skillGapResult = getSkillGraphScore(resumeSkills || [], role || '');
+  const adaptiveState = adaptiveEngine.createInitialState({
+    role: role || 'Software Developer',
+    resumeSkills: resumeSkills || [],
+    skillGaps: skillGapResult.skillGap || [],
+  });
+
   sessions[sessionId] = {
     id: sessionId,
     name,
     email,
-    role,
+    role: role || 'Software Developer',
     createdAt: new Date(),
     answers: [],
     scores: {},
@@ -30,22 +39,29 @@ exports.createSession = (req, res) => {
     visionHistory: [],
     audioHistory: [],
     currentQuestionIndex: 0,
+    adaptiveState,
+    skillGraphResult: skillGapResult,
   };
+
   res.json({ sessionId, session: sessions[sessionId] });
 };
 
 exports.getSession = (req, res) => {
   const session = sessions[req.params.sessionId];
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  res.json(session);
+
+  const safeSession = { ...session };
+  delete safeSession.adaptiveState;
+  res.json(safeSession);
 };
 
 exports.submitAnswer = async (req, res) => {
   const { sessionId } = req.params;
   const {
-    question, answer, questionType,
+    question, answer, questionType, questionId, difficulty,
     emotionData, videoFrame, audioData,
     viTResult, audioFeatures,
+    skill,
   } = req.body;
   const session = sessions[sessionId];
   if (!session) return res.status(404).json({ error: 'Session not found' });
@@ -80,6 +96,9 @@ exports.submitAnswer = async (req, res) => {
     question,
     answer,
     questionType,
+    questionId: questionId || null,
+    difficulty: difficulty || 1,
+    skill: skill || null,
     semanticScore,
     confidenceScore,
     emotionData: emotionData || visionAnalysis?.scores || null,
@@ -102,11 +121,48 @@ exports.submitAnswer = async (req, res) => {
   session.scores.semantic = semanticScore;
   session.scores.confidence = confidenceScore;
 
+  const answerHistory = session.answers.map((a) => ({
+    questionId: a.questionId,
+    text: a.question,
+    type: a.questionType,
+    score: a.semanticScore,
+    skill: a.skill,
+  }));
+
+  const technicalScores = session.answers
+    .filter((a) => a.questionType === 'technical' || a.questionType === 'adaptive')
+    .map((a) => a.semanticScore);
+
+  session.adaptiveState = {
+    ...session.adaptiveState,
+    answerHistory,
+    scores: {
+      ...session.adaptiveState.scores,
+      technical: technicalScores.length > 0
+        ? Math.round(technicalScores.reduce((s, v) => s + v, 0) / technicalScores.length)
+        : 0,
+      semantic: semanticScore,
+      confidence: confidenceScore,
+    },
+    currentDifficulty: difficulty || session.adaptiveState.currentDifficulty,
+    currentQuestionIndex: session.answers.length,
+  };
+
+  session.currentQuestionIndex = session.answers.length;
+
+  const isComplete = session.answers.length >= session.adaptiveState.maxQuestions;
+
   res.json({
     answerRecord,
     nextQuestion: session.currentQuestionIndex + 1,
     audioAnalysis,
     visionAnalysis,
+    adaptiveState: {
+      currentDifficulty: session.adaptiveState.currentDifficulty,
+      currentQuestionIndex: session.adaptiveState.currentQuestionIndex,
+      maxQuestions: session.adaptiveState.maxQuestions,
+      isComplete,
+    },
   });
 };
 
@@ -240,9 +296,68 @@ exports.transcribeAudio = async (req, res) => {
   }
 };
 
-exports.getQuestions = (req, res) => {
-  const { role } = req.query;
-  const questions = generateAdaptiveQuestions(role || 'Software Developer');
+exports.getNextQuestion = async (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions[sessionId];
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  if (session.answers.length >= session.adaptiveState.maxQuestions) {
+    return res.json({ question: null, isComplete: true });
+  }
+
+  try {
+    const question = await adaptiveEngine.generateQuestion(session.adaptiveState);
+    res.json({
+      question,
+      isComplete: false,
+      sessionProgress: {
+        answered: session.answers.length,
+        total: session.adaptiveState.maxQuestions,
+        currentDifficulty: session.adaptiveState.currentDifficulty,
+      },
+    });
+  } catch (err) {
+    console.error('Adaptive question generation failed:', err.message);
+    res.status(500).json({
+      error: 'Failed to generate question',
+      question: {
+        id: `fallback_${Date.now()}`,
+        type: 'technical',
+        difficulty: 1,
+        text: 'Can you describe a technical project you have worked on recently and the challenges you faced?',
+        metadata: { skill: null, rationale: 'Fallback on error', generationMethod: 'fallback' },
+      },
+    });
+  }
+};
+
+exports.getQuestions = async (req, res) => {
+  const { role, resumeSkills } = req.query;
+  const skills = resumeSkills ? resumeSkills.split(',') : [];
+
+  const state = adaptiveEngine.createInitialState({
+    role: role || 'Software Developer',
+    resumeSkills: skills,
+    skillGaps: [],
+  });
+
+  const questions = [];
+  const tempState = { ...state, answerHistory: [] };
+  for (let i = 0; i < 8; i++) {
+    try {
+      const q = await adaptiveEngine.generateQuestion(tempState);
+      questions.push(q);
+      tempState.answerHistory.push({
+        questionId: q.id,
+        text: q.text,
+        type: q.type,
+        score: 50,
+        skill: q.metadata?.skill,
+      });
+    } catch {
+      break;
+    }
+  }
   res.json({ questions });
 };
 
@@ -258,61 +373,10 @@ exports.getSessionAnalytics = (req, res) => {
     audioHistory: session.audioHistory.slice(-20),
     behaviorHistory: session.behaviorHistory.slice(-20),
     currentQuestionIndex: session.currentQuestionIndex,
+    adaptiveState: {
+      currentDifficulty: session.adaptiveState?.currentDifficulty,
+      currentQuestionIndex: session.adaptiveState?.currentQuestionIndex,
+      maxQuestions: session.adaptiveState?.maxQuestions,
+    },
   });
 };
-
-function generateAdaptiveQuestions(role) {
-  const questionBank = {
-    'Software Developer': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain React Hooks and their use cases.' },
-      { id: 3, type: 'technical', question: 'What is the difference between REST and GraphQL?' },
-      { id: 4, type: 'technical', question: 'Explain the concept of virtual DOM.' },
-      { id: 5, type: 'behavioral', question: 'Describe a challenging bug you fixed.' },
-      { id: 6, type: 'technical', question: 'What are microservices? Explain their pros and cons.' },
-      { id: 7, type: 'behavioral', question: 'How do you handle tight deadlines?' },
-      { id: 8, type: 'hr', question: 'Where do you see yourself in 5 years?' },
-    ],
-    'AI/ML Engineer': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain the difference between supervised and unsupervised learning.' },
-      { id: 3, type: 'technical', question: 'What is overfitting and how do you prevent it?' },
-      { id: 4, type: 'technical', question: 'Explain transformers in NLP.' },
-      { id: 5, type: 'behavioral', question: 'Describe an ML project you deployed.' },
-      { id: 6, type: 'technical', question: 'What evaluation metrics do you use for classification?' },
-      { id: 7, type: 'behavioral', question: 'How do you handle imbalanced datasets?' },
-      { id: 8, type: 'hr', question: 'Why are you interested in AI/ML?' },
-    ],
-    'Data Analyst': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain the difference between SQL and NoSQL databases.' },
-      { id: 3, type: 'technical', question: 'What is a p-value in statistics?' },
-      { id: 4, type: 'technical', question: 'How do you handle missing data?' },
-      { id: 5, type: 'behavioral', question: 'Describe a data-driven decision you influenced.' },
-      { id: 6, type: 'technical', question: 'Explain different types of joins in SQL.' },
-      { id: 7, type: 'behavioral', question: 'How do you present findings to stakeholders?' },
-      { id: 8, type: 'hr', question: 'What tools do you use for data analysis?' },
-    ],
-    'Cloud Engineer': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'Explain the differences between IaaS, PaaS, and SaaS.' },
-      { id: 3, type: 'technical', question: 'What is Docker and how does it work?' },
-      { id: 4, type: 'technical', question: 'Explain CI/CD pipeline.' },
-      { id: 5, type: 'behavioral', question: 'Describe a cloud migration you worked on.' },
-      { id: 6, type: 'technical', question: 'What is Kubernetes and why use it?' },
-      { id: 7, type: 'behavioral', question: 'How do you ensure security in the cloud?' },
-      { id: 8, type: 'hr', question: 'Which cloud providers are you experienced with?' },
-    ],
-    'Cyber Security Analyst': [
-      { id: 1, type: 'hr', question: 'Tell me about yourself.' },
-      { id: 2, type: 'technical', question: 'What is the difference between threat, vulnerability, and risk?' },
-      { id: 3, type: 'technical', question: 'Explain the OWASP Top 10.' },
-      { id: 4, type: 'technical', question: 'How do you handle a security breach?' },
-      { id: 5, type: 'behavioral', question: 'Describe a security incident you resolved.' },
-      { id: 6, type: 'technical', question: 'What is encryption and why is it important?' },
-      { id: 7, type: 'behavioral', question: 'How do you stay updated on security threats?' },
-      { id: 8, type: 'hr', question: 'Why did you choose cybersecurity?' },
-    ],
-  };
-  return questionBank[role] || questionBank['Software Developer'];
-}

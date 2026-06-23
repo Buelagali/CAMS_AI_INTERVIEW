@@ -12,7 +12,7 @@ export default function CircularScore({ label, value = 0, color = 'var(--accent-
             cy={size / 2}
             r={radius}
             fill="none"
-            stroke="rgba(255,255,255,0.06)"
+            stroke="rgba(0,0,0,0.07)"
             strokeWidth={6}
           />
           <circle
@@ -33,7 +33,7 @@ export default function CircularScore({ label, value = 0, color = 'var(--accent-
             y={size / 2 - 4}
             textAnchor="middle"
             dominantBaseline="central"
-            fill="white"
+            fill="var(--text-primary)"
             fontSize={size > 130 ? 22 : 18}
             fontWeight="700"
           >

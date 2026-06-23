@@ -87,11 +87,11 @@ export default function Dashboard() {
                   <stop offset="95%" stopColor="var(--accent-1)" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 11 }} angle={-35} textAnchor="end" height={80} />
-              <YAxis domain={[0, 100]} tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 11 }} />
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.07)" />
+              <XAxis dataKey="name" tick={{ fill: 'var(--text-primary)', fontSize: 11 }} angle={-35} textAnchor="end" height={80} />
+              <YAxis domain={[0, 100]} tick={{ fill: 'var(--text-secondary)', fontSize: 11 }} />
               <Tooltip
-                contentStyle={{ background: '#1a1a3a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: 'white' }}
+                contentStyle={{ background: '#ffffff', border: '1px solid rgba(0,0,0,0.1)', borderRadius: 8, color: '#1a1a2e' }}
               />
               <Area type="monotone" dataKey="value" stroke="var(--accent-1)" fill="url(#perfGrad)" strokeWidth={2} />
             </AreaChart>
@@ -102,11 +102,11 @@ export default function Dashboard() {
           <h3 style={{ fontSize: 16, marginBottom: 16, color: 'var(--text-secondary)' }}>Score Comparison</h3>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={performanceData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 11 }} angle={-35} textAnchor="end" height={80} />
-              <YAxis domain={[0, 100]} tick={{ fill: 'rgba(255,255,255,0.3)', fontSize: 11 }} />
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.07)" />
+              <XAxis dataKey="name" tick={{ fill: 'var(--text-primary)', fontSize: 11 }} angle={-35} textAnchor="end" height={80} />
+              <YAxis domain={[0, 100]} tick={{ fill: 'var(--text-secondary)', fontSize: 11 }} />
               <Tooltip
-                contentStyle={{ background: '#1a1a3a', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: 'white' }}
+                contentStyle={{ background: '#ffffff', border: '1px solid rgba(0,0,0,0.1)', borderRadius: 8, color: '#1a1a2e' }}
               />
               <Bar dataKey="value" radius={[6, 6, 0, 0]}>
                 {performanceData.map((entry, idx) => (

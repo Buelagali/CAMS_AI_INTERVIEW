@@ -107,7 +107,7 @@ export default function UploadResume() {
                   strokeLinecap="round"
                   transform="rotate(-90, 50, 50)"
                 />
-                <text x="50" y="50" textAnchor="middle" dominantBaseline="central" fill="white" fontSize="20" fontWeight="700">
+                <text x="50" y="50" textAnchor="middle" dominantBaseline="central" fill="var(--text-primary)" fontSize="20" fontWeight="700">
                   {matchResult.matchScore}%
                 </text>
               </svg>

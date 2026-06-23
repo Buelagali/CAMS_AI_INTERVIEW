@@ -23,20 +23,19 @@ import {
   removeListeners,
 } from '../services/sttService';
 import {
-  generateQuestion,
   calculateAnswerScore,
   calculateCommunicationScore,
   calculateConfidenceFromAnswer,
   calculateEmotionStability,
-  createInitialMemory,
-  getMissingSkills,
   getSkillGraph,
+  fetchAdaptiveQuestion,
+  generateQuestion as localGenerateQuestion,
 } from '../utils/questionEngine';
 
 const MAX_QUESTIONS = 8;
 
-const DIFFICULTY_LABELS = { 1: 'Beginner', 2: 'Intermediate', 3: 'Advanced', 4: 'Expert' };
-const DIFFICULTY_COLORS = { 1: 'var(--accent-2)', 2: 'var(--accent-4)', 3: 'var(--accent-5)', 4: 'var(--accent-3)' };
+const DIFFICULTY_LABELS = { 1: 'Beginner', 2: 'Intermediate', 3: 'Advanced' };
+const DIFFICULTY_COLORS = { 1: 'var(--accent-2)', 2: 'var(--accent-4)', 3: 'var(--accent-5)' };
 
 export default function Interview() {
   const navigate = useNavigate();
@@ -54,6 +53,9 @@ export default function Interview() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sttStatus, setSttStatus] = useState('');
   const [transcriptionConfidence, setTranscriptionConfidence] = useState(0);
+  const [questionLoading, setQuestionLoading] = useState(false);
+  const [currentDifficulty, setCurrentDifficulty] = useState(1);
+  const [sessionId, setSessionId] = useState(null);
   const [scores, setScores] = useState({
     technical: 0, communication: 0, confidence: 0, behavior: 0,
     resumeMatch: 0, semantic: 0, emotion: 0, overall: 0,
@@ -65,8 +67,6 @@ export default function Interview() {
   const [confidenceHistory, setConfidenceHistory] = useState([]);
   const [interviewComplete, setInterviewComplete] = useState(false);
   const [cameraActive, setCameraActive] = useState(true);
-  const [interviewMemory, setInterviewMemory] = useState(null);
-  const [askedQuestionIds, setAskedQuestionIds] = useState(new Set());
   const [scoreHistory, setScoreHistory] = useState([]);
 
   const recognitionRef = useRef(null);
@@ -76,14 +76,51 @@ export default function Interview() {
   const emotionIntervalRef = useRef(null);
   const memoryRef = useRef(null);
   const audioCaptureRef = useRef(null);
+  const currentQuestionRef = useRef(null);
 
   useEffect(() => {
-    const mem = createInitialMemory(candidate.role, resumeData);
-    mem.skillGaps = getMissingSkills(candidate.role, resumeData.skills || []);
-    memoryRef.current = mem;
-    setInterviewMemory(mem);
-    generateNextQuestion(mem);
+    initInterviewSession();
   }, []);
+
+  const initInterviewSession = async () => {
+    try {
+      const res = await fetch('/api/interview/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: candidate.name || 'Candidate',
+          email: candidate.email || '',
+          role: candidate.role || 'Software Developer',
+          resumeSkills: resumeData.skills || [],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSessionId(data.sessionId);
+        memoryRef.current = { ...data.session.adaptiveState, sessionId: data.sessionId };
+        await generateNextQuestion(data.session.adaptiveState);
+      } else {
+        fallbackInit();
+      }
+    } catch {
+      fallbackInit();
+    }
+  };
+
+  const fallbackInit = () => {
+    const mem = {
+      role: candidate.role || 'Software Developer',
+      resumeSkills: resumeData.skills || [],
+      skillGaps: [],
+      answerHistory: [],
+      scores: { technical: 0, communication: 0, confidence: 0, semantic: 0 },
+      currentDifficulty: 1,
+      currentQuestionIndex: 0,
+      maxQuestions: MAX_QUESTIONS,
+    };
+    memoryRef.current = mem;
+    generateNextQuestion(mem);
+  };
 
   useEffect(() => {
     initDualPathSTT();
@@ -129,26 +166,67 @@ export default function Interview() {
     }
   }, [currentQuestion, currentQ]);
 
-  const generateNextQuestion = (mem) => {
+  const generateNextQuestion = async (mem) => {
     const m = mem || memoryRef.current;
     if (!m) return;
-    if (m.questionCount >= MAX_QUESTIONS) {
+    if ((m.questionCount || m.currentQuestionIndex || 0) >= MAX_QUESTIONS) {
       setInterviewComplete(true);
       return;
     }
-    const q = generateQuestion({
-      role: candidate.role,
-      resumeSkills: resumeData.skills || [],
-      interviewMemory: m,
+    setQuestionLoading(true);
+
+    if (sessionId) {
+      try {
+        const data = await fetchAdaptiveQuestion(sessionId);
+        if (data.isComplete) {
+          setInterviewComplete(true);
+          setQuestionLoading(false);
+          return;
+        }
+        if (data.question) {
+          const q = data.question;
+          currentQuestionRef.current = q;
+          setCurrentQuestion(q);
+          setCurrentQ(m.currentQuestionIndex || 0);
+          setCurrentDifficulty(q.difficulty || 1);
+          if (data.sessionProgress) {
+            setCurrentDifficulty(data.sessionProgress.currentDifficulty);
+          }
+          setQuestionLoading(false);
+          return;
+        }
+      } catch (err) {
+        console.warn('Backend adaptive question failed, using fallback:', err.message);
+      }
+    }
+
+    const interviewMemory = {
+      askedQuestions: (m.answerHistory || []).map((a) => ({
+        id: a.questionId || a.text,
+        text: a.text,
+        type: a.type,
+      })),
+      scores: m.scores || { technical: 0, communication: 0, confidence: 0, semantic: 0 },
+      questionCount: (m.currentQuestionIndex || 0),
+    };
+    const localQ = localGenerateQuestion({
+      role: m.role || candidate.role,
+      resumeSkills: m.resumeSkills || resumeData.skills || [],
+      interviewMemory,
       currentEmotion: emotion,
     });
-    if (q) {
-      setCurrentQuestion(q);
-      setCurrentQ(m.questionCount);
-      const newIds = new Set(m.askedQuestions.map((aq) => aq.id));
-      newIds.add(q.id);
-      setAskedQuestionIds(newIds);
-    }
+    const q = localQ || {
+      id: `fallback_${Date.now()}`,
+      type: 'technical',
+      difficulty: Math.min(3, (m.currentDifficulty || 1)),
+      text: 'Can you describe a technical project you have worked on recently and the challenges you faced?',
+      metadata: { skill: null, rationale: 'Last resort fallback', generationMethod: 'fallback' },
+    };
+    currentQuestionRef.current = q;
+    setCurrentQuestion(q);
+    setCurrentQ(m.currentQuestionIndex || 0);
+    setCurrentDifficulty(q.difficulty || (m.currentDifficulty || 1));
+    setQuestionLoading(false);
   };
 
   const initDualPathSTT = () => {
@@ -276,9 +354,11 @@ export default function Interview() {
     const commScore = calculateCommunicationScore(transcript);
 
     const submittedEntry = {
+      questionId: currentQuestion.id,
       question: currentQuestion.text,
       questionType: currentQuestion.type,
       difficulty: currentQuestion.difficulty,
+      skill: currentQuestion.metadata?.skill || null,
       answer: transcript,
       score: semanticScore,
       confidence: confidenceScore,
@@ -287,64 +367,101 @@ export default function Interview() {
       timestamp: Date.now(),
     };
 
+    if (sessionId) {
+      try {
+        await fetch(`/api/interview/session/${sessionId}/answer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question: currentQuestion.text,
+            answer: transcript,
+            questionType: currentQuestion.type,
+            questionId: currentQuestion.id,
+            difficulty: currentQuestion.difficulty,
+            skill: currentQuestion.metadata?.skill || null,
+            emotionData: emotionScores,
+          }),
+        });
+      } catch (err) {
+        console.warn('Failed to submit answer to backend:', err.message);
+      }
+    }
+
     const newAnswers = [...answers, submittedEntry];
     setAnswers(newAnswers);
     setConfidenceHistory((prev) => [...prev, confidenceScore]);
 
-    const mem = memoryRef.current;
-    if (mem) {
-      mem.askedQuestions.push({
-        id: currentQuestion.id,
-        type: currentQuestion.type,
-        difficulty: currentQuestion.difficulty,
-        score: semanticScore,
-      });
-      mem.answers.push(submittedEntry);
-      mem.questionCount++;
+    const mem = memoryRef.current || {
+      role: candidate.role,
+      resumeSkills: resumeData.skills || [],
+      skillGaps: [],
+      answerHistory: [],
+      scores: { technical: 0, communication: 0, confidence: 0, semantic: 0 },
+      currentDifficulty: 1,
+      currentQuestionIndex: 0,
+      maxQuestions: MAX_QUESTIONS,
+    };
 
-      const techScores = newAnswers
-        .filter((a) => a.questionType === 'technical')
-        .map((a) => a.score);
-      const allScores = newAnswers.map((a) => a.score);
-      const allComm = newAnswers.map((a) => a.communication);
-      const allConf = newAnswers.map((a) => a.confidence);
+    mem.answerHistory = (mem.answerHistory || []).concat([{
+      questionId: currentQuestion.id,
+      text: currentQuestion.text,
+      type: currentQuestion.type,
+      score: semanticScore,
+      skill: currentQuestion.metadata?.skill || null,
+    }]);
+    mem.currentQuestionIndex = (mem.currentQuestionIndex || 0) + 1;
 
-      mem.scores.technical = techScores.length > 0
-        ? Math.round(techScores.reduce((s, v) => s + v, 0) / techScores.length) : 0;
-      mem.scores.semantic = allScores.length > 0
-        ? Math.round(allScores.reduce((s, v) => s + v, 0) / allScores.length) : 0;
-      mem.scores.communication = allComm.length > 0
-        ? Math.round(allComm.reduce((s, v) => s + v, 0) / allComm.length) : 0;
-      mem.scores.confidence = allConf.length > 0
-        ? Math.round(allConf.reduce((s, v) => s + v, 0) / allConf.length) : 0;
-      memoryRef.current = mem;
-      setInterviewMemory({ ...mem });
+    const techScores = newAnswers
+      .filter((a) => a.questionType === 'technical' || a.questionType === 'adaptive')
+      .map((a) => a.score);
+    const allScores = newAnswers.map((a) => a.score);
+    const allComm = newAnswers.map((a) => a.communication);
+    const allConf = newAnswers.map((a) => a.confidence);
+
+    mem.scores = {
+      technical: techScores.length > 0
+        ? Math.round(techScores.reduce((s, v) => s + v, 0) / techScores.length) : 0,
+      communication: allComm.length > 0
+        ? Math.round(allComm.reduce((s, v) => s + v, 0) / allComm.length) : 0,
+      confidence: allConf.length > 0
+        ? Math.round(allConf.reduce((s, v) => s + v, 0) / allConf.length) : 0,
+      semantic: allScores.length > 0
+        ? Math.round(allScores.reduce((s, v) => s + v, 0) / allScores.length) : 0,
+    };
+    mem.skillGaps = mem.skillGaps || [];
+
+    if (semanticScore > 75) {
+      mem.currentDifficulty = Math.min(3, (mem.currentDifficulty || 1) + 1);
+    } else if (semanticScore < 50) {
+      mem.currentDifficulty = Math.max(1, (mem.currentDifficulty || 1) - 1);
     }
+
+    memoryRef.current = mem;
 
     const newScores = { ...scores };
-    if (mem) {
-      newScores.technical = mem.scores.technical;
-      newScores.semantic = mem.scores.semantic;
-      newScores.communication = mem.scores.communication;
-      newScores.confidence = mem.scores.confidence;
-    }
+    newScores.technical = mem.scores.technical;
+    newScores.semantic = mem.scores.semantic;
+    newScores.communication = mem.scores.communication;
+    newScores.confidence = mem.scores.confidence;
+
     const avgEmotion = confidenceHistory.length > 0
       ? Math.round(confidenceHistory.reduce((a, b) => a + b, 0) / confidenceHistory.length)
       : 50;
     newScores.behavior = avgEmotion;
     newScores.emotion = avgEmotion;
+    setCurrentDifficulty(mem.currentDifficulty);
     setScores(newScores);
 
     setScoreHistory((prev) => [...prev, { qNumber: newAnswers.length, technical: newScores.technical, semantic: semanticScore, confidence: confidenceScore }]);
 
-    if (mem && mem.questionCount >= MAX_QUESTIONS) {
+    if (mem.currentQuestionIndex >= MAX_QUESTIONS) {
       setInterviewComplete(true);
     } else {
       setTranscript('');
-      generateNextQuestion(mem);
+      await generateNextQuestion(mem);
     }
     setIsProcessing(false);
-  }, [transcript, currentQuestion, isProcessing, answers, scores, emotion, confidenceHistory, candidate.role, resumeData, transcriptionConfidence]);
+  }, [transcript, currentQuestion, isProcessing, answers, scores, emotion, confidenceHistory, emotionScores, candidate.role, resumeData, transcriptionConfidence, sessionId]);
 
   const handleFinish = () => {
     const avgConfidence = confidenceHistory.length > 0
@@ -462,8 +579,8 @@ export default function Interview() {
   };
 
   const canSubmit = transcript.trim().length > 10 && !isSpeaking && !isProcessing;
-  const progress = Math.min(100, ((interviewMemory?.questionCount || 0) / MAX_QUESTIONS) * 100);
-  const questionNum = Math.min((interviewMemory?.questionCount || 0) + 1, MAX_QUESTIONS);
+  const progress = Math.min(100, (answers.length / MAX_QUESTIONS) * 100);
+  const questionNum = Math.min(answers.length + 1, MAX_QUESTIONS);
   const diffLabel = currentQuestion ? DIFFICULTY_LABELS[currentQuestion.difficulty] : '';
   const diffColor = currentQuestion ? DIFFICULTY_COLORS[currentQuestion.difficulty] : '';
 
@@ -480,7 +597,7 @@ export default function Interview() {
         <div className="card slide-up" style={{ marginBottom: 24, textAlign: 'center', padding: '20px 24px' }}>
           <h2 className="gradient-text" style={{ marginBottom: 8, fontSize: 22 }}>Interview Complete!</h2>
           <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 16 }}>
-            All {MAX_QUESTIONS} questions answered. Generating your comprehensive feedback report...
+            {answers.length} adaptive questions answered. Generating your comprehensive feedback report...
           </p>
           <button className="btn btn-primary" onClick={handleFinish} style={{ padding: '14px 48px', fontSize: 16 }}>
             View Results
@@ -494,7 +611,7 @@ export default function Interview() {
             <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Interview Progress</span>
             <span style={{ fontSize: 13, color: 'var(--text-secondary)', fontWeight: 600 }}>{Math.round(progress)}%</span>
           </div>
-          <div style={{ width: '100%', height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+          <div style={{ width: '100%', height: 6, background: 'rgba(0,0,0,0.06)', borderRadius: 3, overflow: 'hidden' }}>
             <div style={{ width: `${progress}%`, height: '100%', background: 'linear-gradient(90deg, var(--accent-1), var(--accent-2))', borderRadius: 3, transition: 'width 0.5s ease' }} />
           </div>
         </div>
@@ -515,12 +632,12 @@ export default function Interview() {
               <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
                 {diffLabel && (
                   <span style={{ padding: '2px 12px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: `${diffColor}22`, color: diffColor }}>
-                    Level {currentQuestion.difficulty}: {diffLabel}
+                    {diffLabel}
                   </span>
                 )}
-                {interviewMemory?.questionCount > 0 && (
+                {currentDifficulty && (
                   <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    Previous: {answers[answers.length - 1]?.score || 0}%
+                    Difficulty: {DIFFICULTY_LABELS[currentDifficulty]} &middot; Q{questionNum} of {MAX_QUESTIONS}
                   </span>
                 )}
               </div>
@@ -533,7 +650,14 @@ export default function Interview() {
             </>
           ) : !interviewComplete ? (
             <div className="card" style={{ textAlign: 'center', padding: 40 }}>
-              <p style={{ color: 'var(--text-muted)' }}>Preparing your first question...</p>
+              <p style={{ color: 'var(--text-muted)' }}>
+                {questionLoading ? 'Generating adaptive question...' : 'Preparing your first question...'}
+              </p>
+              {questionLoading && (
+                <div style={{ marginTop: 12, fontSize: 12, color: 'var(--accent-4)' }}>
+                  Analyzing your profile and skill graph...
+                </div>
+              )}
             </div>
           ) : null}
 
