@@ -37,7 +37,15 @@ exports.analyzeFrame = async (imageBuffer) => {
 
   try {
     const pipe = await getImagePipeline();
-    const image = await RawImage.from(imageBuffer).resize(224, 224);
+    let image;
+    try {
+      image = await RawImage.from(imageBuffer).resize(224, 224);
+    } catch (rawErr) {
+      console.warn('RawImage.from failed, input may not be valid image data:', rawErr.message);
+      return { emotion: 'Neutral', confidence: 0.5, behavior: 'unknown', scores: {
+        Happy: 0.1, Neutral: 0.5, Sad: 0.1, Nervous: 0.1, Angry: 0.1, Confident: 0.1,
+      } };
+    }
     const output = await pipe(image);
 
     const top = output[0];

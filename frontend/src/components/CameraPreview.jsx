@@ -11,10 +11,11 @@ const emotionOrder = ['Angry', 'Sad', 'Nervous', 'Neutral', 'Happy', 'Confident'
 const emotionY = {};
 emotionOrder.forEach((e, i) => { emotionY[e] = (emotionOrder.length - 1 - i) * 20 + 10; });
 
-export default function CameraPreview({ videoRef, cameraActive, emotion, emotionScores, emotionHistory, emotionScoresHistory }) {
+export default function CameraPreview({ videoRef, cameraActive, emotion, emotionScores, emotionHistory, emotionScoresHistory, faceDetected }) {
   const mainEmotion = emotion || 'Neutral';
   const safeHistory = emotionHistory || [];
   const safeScoresHistory = emotionScoresHistory || [];
+  const noFace = faceDetected === false;
 
   const chartWidth = 280;
   const chartHeight = 110;
@@ -37,7 +38,11 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
             autoPlay
             muted
             playsInline
-            style={{ width: '100%', height: 240, objectFit: 'cover', background: '#000' }}
+            style={{
+              width: '100%', height: 240, objectFit: 'cover',
+              background: '#000',
+              outline: noFace ? '3px solid #ff4757' : '3px solid #00d4aa',
+            }}
           />
         ) : (
           <div
@@ -91,8 +96,8 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
             right: 12,
             padding: '8px 16px',
             borderRadius: 20,
-            background: `${emotionColors[mainEmotion] || 'var(--accent-1)'}33`,
-            border: `1px solid ${emotionColors[mainEmotion] || 'var(--accent-1)'}`,
+            background: noFace ? 'rgba(255,100,100,0.2)' : `${emotionColors[mainEmotion] || 'var(--accent-1)'}33`,
+            border: `1px solid ${noFace ? '#ff6464' : (emotionColors[mainEmotion] || 'var(--accent-1)')}`,
             fontSize: 14,
             fontWeight: 500,
             display: 'flex',
@@ -100,7 +105,7 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
             gap: 8,
           }}
         >
-          <span>{mainEmotion}</span>
+          <span>{noFace ? 'No Face' : mainEmotion}</span>
         </div>
       </div>
 
@@ -109,7 +114,11 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
           Emotion Analysis
         </h4>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
-          {Object.entries(emotionScores || {}).map(([em, score]) => (
+          {noFace ? (
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: 8 }}>
+              Position your face in the camera
+            </p>
+          ) : (Object.entries(emotionScores || {}).map(([em, score]) => (
             <div key={em} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 12, width: 70, color: em === mainEmotion ? emotionColors[em] : 'var(--text-muted)' }}>
                 {em}
@@ -134,7 +143,7 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
                 />
               </div>
             </div>
-          ))}
+          )))}
         </div>
 
         {safeHistory.length > 1 && (

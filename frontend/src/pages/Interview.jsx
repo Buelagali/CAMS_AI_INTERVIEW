@@ -10,6 +10,7 @@ import {
   stopCapture,
   isCurrentlyRecording,
   getRecordingDuration,
+  forceStopCapture,
 } from '../services/audioCapture';
 import {
   initWebSpeech,
@@ -64,6 +65,7 @@ export default function Interview() {
   const [emotionScores, setEmotionScores] = useState({});
   const [emotionHistory, setEmotionHistory] = useState([]);
   const [emotionScoresHistory, setEmotionScoresHistory] = useState([]);
+  const [faceDetected, setFaceDetected] = useState(true);
   const [confidenceHistory, setConfidenceHistory] = useState([]);
   const [interviewComplete, setInterviewComplete] = useState(false);
   const [cameraActive, setCameraActive] = useState(true);
@@ -130,7 +132,7 @@ export default function Interview() {
       stopSpeaking();
       stopWebSpeech();
       removeListeners();
-      if (isCurrentlyRecording()) stopCapture();
+      if (isCurrentlyRecording()) forceStopCapture();
       if (emotionIntervalRef.current) clearInterval(emotionIntervalRef.current);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
@@ -142,16 +144,15 @@ export default function Interview() {
     if (videoRef.current && cameraActive) {
       emotionIntervalRef.current = setInterval(async () => {
         const result = await detectEmotion(videoRef.current);
-        if (result) {
-          setEmotion(result.emotion);
-          setEmotionScores(result.scores);
-          setEmotionHistory((prev) => [...prev.slice(-19), result.emotion]);
-          setEmotionScoresHistory((prev) => [...prev.slice(-19), result.scores]);
-          setConfidenceHistory((prev) => {
-            const newVal = [...prev, Math.round(result.score * 100)];
-            return newVal.slice(-30);
-          });
-        }
+        setFaceDetected(result.faceDetected);
+        setEmotion(result.emotion);
+        setEmotionScores(result.scores);
+        setEmotionHistory((prev) => [...prev.slice(-19), result.emotion]);
+        setEmotionScoresHistory((prev) => [...prev.slice(-19), result.scores]);
+        setConfidenceHistory((prev) => {
+          const newVal = [...prev, Math.round(result.score * 100)];
+          return newVal.slice(-30);
+        });
       }, 1000);
     }
     return () => {
@@ -279,7 +280,7 @@ export default function Interview() {
 
       let audioResult = null;
       if (isCurrentlyRecording()) {
-        audioResult = stopCapture();
+        audioResult = await stopCapture();
       }
 
       if (audioResult && audioResult.blob && audioResult.blob.size > 100) {
@@ -625,6 +626,7 @@ export default function Interview() {
           emotionScores={emotionScores}
           emotionHistory={emotionHistory}
           emotionScoresHistory={emotionScoresHistory}
+          faceDetected={faceDetected}
         />
         <div>
           {currentQuestion && !interviewComplete ? (

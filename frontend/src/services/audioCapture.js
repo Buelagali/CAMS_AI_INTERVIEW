@@ -17,11 +17,13 @@ let audioContext = null;
 let mediaStream = null;
 let scriptProcessor = null;
 let mediaSource = null;
+let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
 let recordingStartTime = 0;
 let totalSamples = 0;
 let noiseGateCallback = null;
+let useMediaRecorder = false;
 
 const NOISE_GATE_THRESHOLD = 0.008;
 const SAMPLE_RATE = 16000;
@@ -117,59 +119,112 @@ export async function startCapture(options = {}) {
       },
     });
 
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({
-      sampleRate: SAMPLE_RATE,
-    });
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+      return startCaptureMediaRecorder(noiseGate, noiseGateThreshold, onChunk);
+    }
 
-    mediaSource = audioContext.createMediaStreamSource(mediaStream);
-
-    const bufferSize = 4096;
-    scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
-
-    recordedChunks = [];
-    totalSamples = 0;
-    recordingStartTime = Date.now();
-
-    let lastChunkTime = recordingStartTime;
-
-    scriptProcessor.onaudioprocess = (event) => {
-      if (!isRecording) return;
-
-      const inputData = event.inputBuffer.getChannelData(0);
-      const processed = noiseGate
-        ? applyNoiseGate(new Float32Array(inputData), noiseGateThreshold)
-        : new Float32Array(inputData);
-
-      recordedChunks.push(processed);
-      totalSamples += processed.length;
-
-      if (onChunk && Date.now() - lastChunkTime >= CHUNK_INTERVAL_MS) {
-        lastChunkTime = Date.now();
-        const accumulated = getAccumulatedSamples();
-        const wavBlob = encodeWAV(accumulated);
-        onChunk({
-          blob: wavBlob,
-          samples: accumulated,
-          duration: accumulated.length / SAMPLE_RATE,
-          totalDuration: totalSamples / SAMPLE_RATE,
-        });
-      }
-    };
-
-    mediaSource.connect(scriptProcessor);
-    scriptProcessor.connect(audioContext.destination);
-
-    isRecording = true;
-
-    return {
-      startTime: recordingStartTime,
-      sampleRate: SAMPLE_RATE,
-    };
+    return startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNormalize, onChunk);
   } catch (err) {
     console.error('Audio capture start failed:', err.message);
     cleanup();
     throw err;
   }
+}
+
+async function startCaptureMediaRecorder(noiseGate, noiseGateThreshold, onChunk) {
+  useMediaRecorder = true;
+  recordedChunks = [];
+  recordingStartTime = Date.now();
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : 'audio/webm';
+
+  mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      recordedChunks.push(event.data);
+    }
+  };
+
+  mediaRecorder.start(100);
+  isRecording = true;
+
+  if (onChunk) {
+    const intervalId = setInterval(() => {
+      if (!isRecording) {
+        clearInterval(intervalId);
+        return;
+      }
+      const totalBlob = new Blob(recordedChunks, { type: mimeType });
+      onChunk({
+        blob: totalBlob,
+        duration: (Date.now() - recordingStartTime) / 1000,
+        totalDuration: (Date.now() - recordingStartTime) / 1000,
+      });
+    }, CHUNK_INTERVAL_MS);
+  }
+
+  return {
+    startTime: recordingStartTime,
+    sampleRate: SAMPLE_RATE,
+    method: 'MediaRecorder',
+  };
+}
+
+async function startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNormalize, onChunk) {
+  useMediaRecorder = false;
+
+  audioContext = new (window.AudioContext || window.webkitAudioContext)({
+    sampleRate: SAMPLE_RATE,
+  });
+
+  mediaSource = audioContext.createMediaStreamSource(mediaStream);
+
+  const bufferSize = 4096;
+  scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+  recordedChunks = [];
+  totalSamples = 0;
+  recordingStartTime = Date.now();
+
+  let lastChunkTime = recordingStartTime;
+
+  scriptProcessor.onaudioprocess = (event) => {
+    if (!isRecording) return;
+
+    const inputData = event.inputBuffer.getChannelData(0);
+    const processed = noiseGate
+      ? applyNoiseGate(new Float32Array(inputData), noiseGateThreshold)
+      : new Float32Array(inputData);
+
+    recordedChunks.push(processed);
+    totalSamples += processed.length;
+
+    if (onChunk && Date.now() - lastChunkTime >= CHUNK_INTERVAL_MS) {
+      lastChunkTime = Date.now();
+      const accumulated = getAccumulatedSamples();
+      const wavBlob = encodeWAV(accumulated);
+      onChunk({
+        blob: wavBlob,
+        samples: accumulated,
+        duration: accumulated.length / SAMPLE_RATE,
+        totalDuration: totalSamples / SAMPLE_RATE,
+      });
+    }
+  };
+
+  mediaSource.connect(scriptProcessor);
+  scriptProcessor.connect(audioContext.destination);
+
+  isRecording = true;
+
+  return {
+    startTime: recordingStartTime,
+    sampleRate: SAMPLE_RATE,
+    method: 'ScriptProcessor',
+  };
 }
 
 export function getAccumulatedSamples() {
@@ -185,10 +240,14 @@ export function getAccumulatedSamples() {
   return result;
 }
 
-export function stopCapture() {
+export async function stopCapture() {
   if (!isRecording) return null;
 
   isRecording = false;
+
+  if (useMediaRecorder) {
+    return stopCaptureMediaRecorder();
+  }
 
   const samples = getAccumulatedSamples();
   const duration = samples.length / SAMPLE_RATE;
@@ -208,6 +267,69 @@ export function stopCapture() {
   };
 }
 
+async function stopCaptureMediaRecorder() {
+  return new Promise((resolve) => {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      cleanup();
+      resolve({ blob: new Blob(), duration: 0, sampleRate: SAMPLE_RATE, timestamp: Date.now() });
+      return;
+    }
+
+    mediaRecorder.onstop = async () => {
+      const rawBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+      const duration = (Date.now() - recordingStartTime) / 1000;
+
+      try {
+        const arrayBuffer = await rawBlob.arrayBuffer();
+        const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+        const channelData = audioBuffer.getChannelData(0);
+
+        const downsampled = downsample(channelData, audioBuffer.sampleRate, SAMPLE_RATE);
+        const normalized = normalizeAudio(downsampled);
+        const wavBlob = encodeWAV(normalized);
+        tempCtx.close();
+
+        cleanup();
+        resolve({
+          blob: wavBlob,
+          samples: normalized,
+          duration,
+          sampleRate: SAMPLE_RATE,
+          timestamp: Date.now(),
+          method: 'MediaRecorder',
+        });
+      } catch (err) {
+        console.warn('MediaRecorder decode failed, sending raw blob:', err.message);
+        cleanup();
+        resolve({
+          blob: rawBlob,
+          duration,
+          sampleRate: SAMPLE_RATE,
+          timestamp: Date.now(),
+          method: 'MediaRecorder-raw',
+          rawFormat: mediaRecorder.mimeType,
+        });
+      }
+    };
+
+    mediaRecorder.stop();
+    mediaStream.getTracks().forEach((t) => t.stop());
+  });
+}
+
+function downsample(samples, fromRate, toRate) {
+  if (fromRate === toRate) return new Float32Array(samples);
+  const ratio = fromRate / toRate;
+  const newLength = Math.round(samples.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const srcIdx = Math.round(i * ratio);
+    result[i] = samples[Math.min(srcIdx, samples.length - 1)];
+  }
+  return result;
+}
+
 export function getRecordingDuration() {
   if (!isRecording) return 0;
   return (Date.now() - recordingStartTime) / 1000;
@@ -217,8 +339,17 @@ export function isCurrentlyRecording() {
   return isRecording;
 }
 
+export function forceStopCapture() {
+  isRecording = false;
+  cleanup();
+}
+
 function cleanup() {
   try {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      try { mediaRecorder.stop(); } catch (e) {}
+      mediaRecorder = null;
+    }
     if (scriptProcessor) {
       scriptProcessor.disconnect();
       scriptProcessor = null;

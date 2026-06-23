@@ -266,7 +266,14 @@ export async function processFinalTranscript(audioResult, options = {}) {
   stopWebSpeech();
 
   if (!audioResult || !audioResult.blob) {
-    return { text: getAccumulatedTranscript(), confidence: 40, fallback: true };
+    return { text: getAccumulatedTranscript(), confidence: 40, fallback: true, error: 'No audio data' };
+  }
+
+  if (audioResult.rawFormat) {
+    if (accumulatedTranscript) {
+      return { text: accumulatedTranscript, confidence: 45, fallback: true, error: `Unsupported format: ${audioResult.rawFormat}` };
+    }
+    return { text: '', confidence: 0, fallback: true, error: `Audio format not supported by backend: ${audioResult.rawFormat}` };
   }
 
   const backendResult = await transcribeWithBackend(audioResult.blob, options);

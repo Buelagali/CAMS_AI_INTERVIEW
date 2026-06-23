@@ -270,6 +270,10 @@ exports.transcribeAudio = async (req, res) => {
       return res.status(400).json({ error: 'Audio too short' });
     }
 
+    if (audioBuffer[0] !== 0x52 || audioBuffer[1] !== 0x49 || audioBuffer[2] !== 0x46 || audioBuffer[3] !== 0x46) {
+      return res.status(400).json({ error: 'Unsupported audio format - expected WAV' });
+    }
+
     const options = {
       noiseReductionStrength: req.body.noiseReductionStrength || 0.5,
       language: req.body.language || 'en',
