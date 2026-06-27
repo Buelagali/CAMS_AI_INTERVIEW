@@ -33,8 +33,6 @@ import {
   generateQuestion as localGenerateQuestion,
 } from '../utils/questionEngine';
 
-const MAX_QUESTIONS = 8;
-
 const DIFFICULTY_LABELS = { 1: 'Beginner', 2: 'Intermediate', 3: 'Advanced' };
 const DIFFICULTY_COLORS = { 1: 'var(--accent-2)', 2: 'var(--accent-4)', 3: 'var(--accent-5)' };
 
@@ -84,6 +82,15 @@ export default function Interview() {
     initInterviewSession();
   }, []);
 
+  useEffect(() => {
+    if (interviewComplete) {
+      const timer = setTimeout(() => {
+        handleFinish();
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [interviewComplete]);
+
   const initInterviewSession = async () => {
     try {
       const res = await fetch('/api/interview/session', {
@@ -118,7 +125,6 @@ export default function Interview() {
       scores: { technical: 0, communication: 0, confidence: 0, semantic: 0 },
       currentDifficulty: 1,
       currentQuestionIndex: 0,
-      maxQuestions: MAX_QUESTIONS,
     };
     memoryRef.current = mem;
     generateNextQuestion(mem);
@@ -161,19 +167,15 @@ export default function Interview() {
   }, [cameraActive]);
 
   useEffect(() => {
-    if (currentQuestion && currentQ <= MAX_QUESTIONS) {
+    if (currentQuestion && !interviewComplete) {
       const timer = setTimeout(() => speakCurrentQuestion(), 300);
       return () => clearTimeout(timer);
     }
-  }, [currentQuestion, currentQ]);
+  }, [currentQuestion, currentQ, interviewComplete]);
 
   const generateNextQuestion = async (mem) => {
     const m = mem || memoryRef.current;
     if (!m) return;
-    if ((m.questionCount || m.currentQuestionIndex || 0) >= MAX_QUESTIONS) {
-      setInterviewComplete(true);
-      return;
-    }
     setQuestionLoading(true);
 
     if (sessionId) {
@@ -182,6 +184,7 @@ export default function Interview() {
         if (data.isComplete) {
           setInterviewComplete(true);
           setQuestionLoading(false);
+          sessionStorage.setItem('terminationReason', data.terminationReason || 'Sufficient evidence collected');
           return;
         }
         if (data.question) {
@@ -199,6 +202,14 @@ export default function Interview() {
       } catch (err) {
         console.warn('Backend adaptive question failed, using fallback:', err.message);
       }
+    }
+
+    const localCount = (m.currentQuestionIndex || 0) + 1;
+    if (localCount >= 7) {
+      setInterviewComplete(true);
+      setQuestionLoading(false);
+      sessionStorage.setItem('terminationReason', 'Sufficient assessment completed');
+      return;
     }
 
     const interviewMemory = {
@@ -370,7 +381,7 @@ export default function Interview() {
 
     if (sessionId) {
       try {
-        await fetch(`/api/interview/session/${sessionId}/answer`, {
+        const res = await fetch(`/api/interview/session/${sessionId}/answer`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -383,6 +394,13 @@ export default function Interview() {
             emotionData: emotionScores,
           }),
         });
+        const result = await res.json();
+        if (result.adaptiveState?.isComplete) {
+          setInterviewComplete(true);
+          sessionStorage.setItem('terminationReason', result.adaptiveState.terminationReason || 'Sufficient evidence collected');
+          setIsProcessing(false);
+          return;
+        }
       } catch (err) {
         console.warn('Failed to submit answer to backend:', err.message);
       }
@@ -400,7 +418,6 @@ export default function Interview() {
       scores: { technical: 0, communication: 0, confidence: 0, semantic: 0 },
       currentDifficulty: 1,
       currentQuestionIndex: 0,
-      maxQuestions: MAX_QUESTIONS,
     };
 
     mem.answerHistory = (mem.answerHistory || []).concat([{
@@ -431,12 +448,6 @@ export default function Interview() {
     };
     mem.skillGaps = mem.skillGaps || [];
 
-    if (semanticScore > 75) {
-      mem.currentDifficulty = Math.min(3, (mem.currentDifficulty || 1) + 1);
-    } else if (semanticScore < 50) {
-      mem.currentDifficulty = Math.max(1, (mem.currentDifficulty || 1) - 1);
-    }
-
     memoryRef.current = mem;
 
     const newScores = { ...scores };
@@ -455,12 +466,8 @@ export default function Interview() {
 
     setScoreHistory((prev) => [...prev, { qNumber: newAnswers.length, technical: newScores.technical, semantic: semanticScore, confidence: confidenceScore }]);
 
-    if (mem.currentQuestionIndex >= MAX_QUESTIONS) {
-      setInterviewComplete(true);
-    } else {
-      setTranscript('');
-      await generateNextQuestion(mem);
-    }
+    setTranscript('');
+    await generateNextQuestion(mem);
     setIsProcessing(false);
   }, [transcript, currentQuestion, isProcessing, answers, scores, emotion, confidenceHistory, emotionScores, candidate.role, resumeData, transcriptionConfidence, sessionId]);
 
@@ -580,17 +587,13 @@ export default function Interview() {
   };
 
   const canSubmit = transcript.trim().length > 10 && !isSpeaking && !isProcessing;
-  const progress = Math.min(100, (answers.length / MAX_QUESTIONS) * 100);
-  const questionNum = Math.min(answers.length + 1, MAX_QUESTIONS);
-  const diffLabel = currentQuestion ? DIFFICULTY_LABELS[currentQuestion.difficulty] : '';
-  const diffColor = currentQuestion ? DIFFICULTY_COLORS[currentQuestion.difficulty] : '';
 
   return (
     <div className="page fade-in">
       <div style={{ marginBottom: 24, textAlign: 'center' }}>
         <h1 style={{ fontSize: 24, marginBottom: 4 }}>Adaptive AI Interview</h1>
         <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
-          {candidate.name} &middot; {candidate.role} &middot; Question {questionNum} of {MAX_QUESTIONS}
+          {candidate.name} &middot; {candidate.role}
         </p>
       </div>
 
@@ -603,18 +606,6 @@ export default function Interview() {
           <button className="btn btn-primary" onClick={handleFinish} style={{ padding: '14px 48px', fontSize: 16 }}>
             View Results
           </button>
-        </div>
-      )}
-
-      {!interviewComplete && (
-        <div style={{ marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Interview Progress</span>
-            <span style={{ fontSize: 13, color: 'var(--text-secondary)', fontWeight: 600 }}>{Math.round(progress)}%</span>
-          </div>
-          <div style={{ width: '100%', height: 6, background: 'rgba(0,0,0,0.06)', borderRadius: 3, overflow: 'hidden' }}>
-            <div style={{ width: `${progress}%`, height: '100%', background: 'linear-gradient(90deg, var(--accent-1), var(--accent-2))', borderRadius: 3, transition: 'width 0.5s ease' }} />
-          </div>
         </div>
       )}
 
@@ -631,18 +622,7 @@ export default function Interview() {
         <div>
           {currentQuestion && !interviewComplete ? (
             <>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-                {diffLabel && (
-                  <span style={{ padding: '2px 12px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: `${diffColor}22`, color: diffColor }}>
-                    {diffLabel}
-                  </span>
-                )}
-                {currentDifficulty && (
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    Difficulty: {DIFFICULTY_LABELS[currentDifficulty]} &middot; Q{questionNum} of {MAX_QUESTIONS}
-                  </span>
-                )}
-              </div>
+
               <QuestionCard
                 question={{ question: currentQuestion.text, type: currentQuestion.type }}
                 isSpeaking={isSpeaking}

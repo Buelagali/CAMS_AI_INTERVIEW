@@ -66,7 +66,12 @@ exports.submitAnswer = async (req, res) => {
   const session = sessions[sessionId];
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
-  const semanticScore = await evaluateAnswer(question, answer);
+  let semanticScore = 50;
+  try {
+    semanticScore = await evaluateAnswer(question, answer);
+  } catch (err) {
+    console.warn('Semantic evaluation failed:', err.message);
+  }
   let confidenceScore = 50;
 
   let audioAnalysis = null;
@@ -133,9 +138,16 @@ exports.submitAnswer = async (req, res) => {
     .filter((a) => a.questionType === 'technical' || a.questionType === 'adaptive')
     .map((a) => a.semanticScore);
 
+  const latestEmotion = visionAnalysis?.emotion || emotionData?.emotion || null;
+  const emotionHistory = session.emotionHistory.length > 0
+    ? session.emotionHistory.map((e) => (typeof e === 'object' ? e.emotion || 'Neutral' : e))
+    : [];
+  if (latestEmotion) emotionHistory.push(latestEmotion);
+
   session.adaptiveState = {
     ...session.adaptiveState,
     answerHistory,
+    emotionHistory,
     scores: {
       ...session.adaptiveState.scores,
       technical: technicalScores.length > 0
@@ -150,7 +162,7 @@ exports.submitAnswer = async (req, res) => {
 
   session.currentQuestionIndex = session.answers.length;
 
-  const isComplete = session.answers.length >= session.adaptiveState.maxQuestions;
+  const evidence = adaptiveEngine.evaluateEvidence(session.adaptiveState);
 
   res.json({
     answerRecord,
@@ -160,8 +172,8 @@ exports.submitAnswer = async (req, res) => {
     adaptiveState: {
       currentDifficulty: session.adaptiveState.currentDifficulty,
       currentQuestionIndex: session.adaptiveState.currentQuestionIndex,
-      maxQuestions: session.adaptiveState.maxQuestions,
-      isComplete,
+      isComplete: evidence.sufficient,
+      terminationReason: evidence.reason,
     },
   });
 };
@@ -305,19 +317,29 @@ exports.getNextQuestion = async (req, res) => {
   const session = sessions[sessionId];
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
-  if (session.answers.length >= session.adaptiveState.maxQuestions) {
-    return res.json({ question: null, isComplete: true });
+  const evidence = adaptiveEngine.evaluateEvidence(session.adaptiveState);
+  if (evidence.sufficient) {
+    return res.json({ question: null, isComplete: true, terminationReason: evidence.reason });
   }
 
   try {
     const question = await adaptiveEngine.generateQuestion(session.adaptiveState);
+    if (!question) {
+      return res.json({
+        question: null,
+        isComplete: true,
+        terminationReason: 'All question sources exhausted',
+      });
+    }
+    const updatedEvidence = adaptiveEngine.evaluateEvidence(session.adaptiveState);
     res.json({
       question,
-      isComplete: false,
+      isComplete: updatedEvidence.sufficient,
+      terminationReason: updatedEvidence.reason,
       sessionProgress: {
         answered: session.answers.length,
-        total: session.adaptiveState.maxQuestions,
         currentDifficulty: session.adaptiveState.currentDifficulty,
+        coverage: updatedEvidence.coverage,
       },
     });
   } catch (err) {
@@ -347,7 +369,7 @@ exports.getQuestions = async (req, res) => {
 
   const questions = [];
   const tempState = { ...state, answerHistory: [] };
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10; i++) {
     try {
       const q = await adaptiveEngine.generateQuestion(tempState);
       questions.push(q);
@@ -380,7 +402,6 @@ exports.getSessionAnalytics = (req, res) => {
     adaptiveState: {
       currentDifficulty: session.adaptiveState?.currentDifficulty,
       currentQuestionIndex: session.adaptiveState?.currentQuestionIndex,
-      maxQuestions: session.adaptiveState?.maxQuestions,
     },
   });
 };

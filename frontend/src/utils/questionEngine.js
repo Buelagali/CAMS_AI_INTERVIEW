@@ -424,7 +424,7 @@ const RESUME_TEMPLATES = [
   { id: 'res_skill_2', type: 'resume', difficulty: 2, template: 'What is the most challenging problem you solved using {skill}?' },
   { id: 'res_skill_3', type: 'resume', difficulty: 3, template: 'How would you compare {skill} with alternative technologies you have used?' },
   { id: 'res_skill_4', type: 'resume', difficulty: 4, template: 'How would you architect a production system using {skill}?' },
-  { id: 'res_exp_1', type: 'resume', difficulty: 2, template: 'Your resume mentions {exp} years of experience. How has your approach to development evolved over this time?' },
+  { id: 'res_exp_1', type: 'resume', difficulty: 2, template: 'What key lessons have you learned from your projects and how have they shaped your approach to development?' },
   { id: 'res_proj_1', type: 'resume', difficulty: 2, template: 'Tell me more about your project involving {skill}. What was your specific role and contribution?' },
   { id: 'res_proj_2', type: 'resume', difficulty: 3, template: 'What technical challenges did you face in your project with {skill}, and how did you overcome them?' },
   { id: 'res_gap_1', type: 'adaptive', difficulty: 2, template: 'I notice you have experience with {skill}. How does this relate to {missingSkill}, which is important for this role?' },
@@ -437,6 +437,69 @@ const ADAPTIVE_QUESTIONS = [
   { id: 'adap_4', difficulty: 4, type: 'adaptive', text: 'Given your experience with {keyword}, how would you design a system to handle edge cases?' },
 ];
 
+const ROLE_FALLBACKS = {
+  'Software Developer': [
+    'Tell me about a project where you used {skill} to solve a real-world problem.',
+    'How do you approach debugging issues in a {skill} codebase?',
+    'What best practices do you follow when writing {skill} code?',
+    'Describe a challenge you faced while working with {skill} and how you overcame it.',
+    'How do you test and validate your {skill} implementations?',
+    'What considerations do you keep in mind when designing systems with {skill}?',
+    'How has your experience with {skill} shaped your approach to software architecture?',
+    'Tell me about a time you optimized a {skill} application for better performance.',
+    'What tools and practices do you use alongside {skill} to ensure code quality?',
+    'How do you stay updated with the latest developments in {skill}?',
+  ],
+  'AI/ML Engineer': [
+    'Tell me about a project where you applied {skill} to solve a machine learning problem.',
+    'How do you approach data preprocessing and feature engineering when using {skill}?',
+    'What challenges have you faced when deploying {skill} models to production?',
+    'Describe how you evaluate and validate models built with {skill}.',
+    'How do you handle data quality issues in your {skill} pipelines?',
+    'What strategies do you use for hyperparameter tuning with {skill}?',
+    'Tell me about a time you had to optimize a {skill} model for performance or memory.',
+    'How do you ensure reproducibility in your {skill} experiments?',
+    'What is your approach to version controlling {skill} models and datasets?',
+    'How do you explain {skill} model predictions to non-technical stakeholders?',
+  ],
+  'Data Analyst': [
+    'Tell me about a project where you used {skill} to derive actionable insights.',
+    'How do you handle missing or inconsistent data when working with {skill}?',
+    'Describe a complex analysis you performed using {skill} and what you discovered.',
+    'How do you ensure the accuracy and reliability of your {skill} analyses?',
+    'What visualization techniques do you prefer when presenting {skill} findings?',
+    'Tell me about a time {skill} helped you identify an unexpected trend or pattern.',
+    'How do you approach exploratory data analysis with {skill}?',
+    'What strategies do you use to communicate {skill} insights to decision-makers?',
+    'How do you manage and organize large datasets when using {skill}?',
+    'Describe a time you automated a repetitive analysis task using {skill}.',
+  ],
+  'Cloud Engineer': [
+    'Tell me about a project where you used {skill} to design a cloud infrastructure.',
+    'How do you approach security and compliance when configuring {skill}?',
+    'Describe a challenge you faced while migrating workloads with {skill}.',
+    'How do you monitor and optimize costs when using {skill}?',
+    'What is your strategy for high availability and disaster recovery with {skill}?',
+    'Tell me about a time you automated infrastructure provisioning using {skill}.',
+    'How do you handle scaling and performance tuning with {skill}?',
+    'What logging and monitoring practices do you implement alongside {skill}?',
+    'Describe how you manage access control and permissions in {skill}.',
+    'How do you approach incident response in a {skill} environment?',
+  ],
+  'Cyber Security Analyst': [
+    'Tell me about a project where you used {skill} to identify or mitigate a security threat.',
+    'How do you approach vulnerability assessment and remediation with {skill}?',
+    'Describe a security incident you analyzed using {skill} and what you found.',
+    'How do you stay current with emerging threats relevant to {skill}?',
+    'What is your methodology for conducting security audits with {skill}?',
+    'Tell me about a time you implemented a security control using {skill}.',
+    'How do you balance security requirements with usability when working with {skill}?',
+    'What tools do you integrate with {skill} for comprehensive security monitoring?',
+    'Describe how you would respond to a breach involving {skill}.',
+    'How do you document and communicate findings from your {skill} security assessments?',
+  ],
+};
+
 const SCENARIOS = {
   'Software Developer': 'a high-traffic e-commerce platform experiencing performance issues',
   'AI/ML Engineer': 'deploying a model that needs to scale to millions of predictions per day',
@@ -444,6 +507,23 @@ const SCENARIOS = {
   'Cloud Engineer': 'migrating a legacy on-premise system to the cloud with zero downtime',
   'Cyber Security Analyst': 'responding to a suspected data breach with potential data exfiltration',
 };
+
+function wordOverlapRatio(a, b) {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
+  const intersection = new Set([...wordsA].filter(w => wordsB.has(w)));
+  const union = new Set([...wordsA, ...wordsB]);
+  return intersection.size / union.size;
+}
+
+function isDuplicate(text, askedTexts) {
+  const t = text.toLowerCase().trim();
+  if (askedTexts.has(t)) return true;
+  for (const asked of askedTexts) {
+    if (wordOverlapRatio(t, asked) > 0.7) return true;
+  }
+  return false;
+}
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -465,19 +545,15 @@ function getDifficultyFromScores(scores) {
     (scores.confidence || 0)
   ) / 3;
 
-  if (avgScore > 80) return DIFFICULTY.EXPERT;
-  if (avgScore > 60) return DIFFICULTY.ADVANCED;
-  if (avgScore > 40) return DIFFICULTY.INTERMEDIATE;
+  if (avgScore >= 65) return DIFFICULTY.ADVANCED;
+  if (avgScore >= 35) return DIFFICULTY.INTERMEDIATE;
   return DIFFICULTY.BEGINNER;
 }
 
 function getNextQuestionType(interviewMemory) {
-  const { askedQuestions, questionCount } = interviewMemory;
-  const maxQuestions = 8;
+  const { askedQuestions } = interviewMemory;
 
-  if (questionCount === 0) return 'hr';
-  if (questionCount === 1) return 'resume';
-  if (questionCount === maxQuestions - 1) return 'hr';
+  if (askedQuestions.length === 0) return 'hr';
 
   const typeCount = {};
   QUESTION_TYPES.forEach((t) => { typeCount[t] = 0; });
@@ -498,14 +574,14 @@ function generateResumeQuestion(resumeSkills, difficulty, askedTexts) {
 
   for (const skill of shuffled) {
     const candidates = RESUME_TEMPLATES.filter(
-      (t) => t.difficulty === difficulty && !askedTexts.has((t.template || '').toLowerCase().trim())
+      (t) => t.difficulty === difficulty && !isDuplicate(t.template, askedTexts)
     );
     if (candidates.length === 0) continue;
 
     const template = pickRandom(candidates);
     const text = template.template
-      .replace('{skill}', skill)
-      .replace('{exp}', 'several');
+      .replace('{skill}', skill);
+    if (isDuplicate(text, askedTexts)) continue;
     return {
       id: template.id + '_' + skill.toLowerCase().replace(/\s+/g, '_'),
       type: template.type,
@@ -531,16 +607,18 @@ function generateAdaptiveQuestion(interviewMemory, difficulty, askedTexts) {
   const scenario = SCENARIOS[interviewMemory.role] || 'a complex technical challenge';
 
   const candidates = ADAPTIVE_QUESTIONS.filter(
-    (q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
+    (q) => q.difficulty <= difficulty && !isDuplicate(q.text, askedTexts)
   );
   if (candidates.length === 0) return null;
 
   const template = pickRandom(candidates);
+  const text = template.text.replace('{keyword}', keyword).replace('{scenario}', scenario);
+  if (isDuplicate(text, askedTexts)) return null;
   return {
     id: template.id + '_' + Date.now(),
     type: 'adaptive',
     difficulty: template.difficulty,
-    text: template.text.replace('{keyword}', keyword).replace('{scenario}', scenario),
+    text,
     source: 'adaptive',
   };
 }
@@ -554,7 +632,7 @@ function generateTechnicalQuestion(role, difficulty, askedTexts, preferredSkill)
 
   if (preferredSkill && roleQuestions[preferredSkill]) {
     const fromSkill = roleQuestions[preferredSkill].filter(
-      (q) => q.difficulty === difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
+      (q) => q.difficulty === difficulty && !isDuplicate(q.text, askedTexts)
     );
     if (fromSkill.length > 0) available = fromSkill;
   }
@@ -563,7 +641,7 @@ function generateTechnicalQuestion(role, difficulty, askedTexts, preferredSkill)
     const shuffledSkills = shuffleArray(skillKeys);
     for (const skill of shuffledSkills) {
       const fromSkill = roleQuestions[skill].filter(
-        (q) => q.difficulty === difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
+        (q) => q.difficulty === difficulty && !isDuplicate(q.text, askedTexts)
       );
       if (fromSkill.length > 0) { available = fromSkill; break; }
     }
@@ -576,7 +654,7 @@ function generateTechnicalQuestion(role, difficulty, askedTexts, preferredSkill)
     for (const skill of shuffled) {
       for (const d of [oneUp, oneDown, difficulty]) {
         const fromSkill = roleQuestions[skill].filter(
-          (q) => q.difficulty === d && !askedTexts.has((q.text || '').toLowerCase().trim())
+          (q) => q.difficulty === d && !isDuplicate(q.text, askedTexts)
         );
         if (fromSkill.length > 0) { available = fromSkill; break; }
       }
@@ -590,7 +668,7 @@ function generateTechnicalQuestion(role, difficulty, askedTexts, preferredSkill)
 
 function generateHRQuestion(difficulty, askedTexts) {
   const candidates = HR_QUESTIONS.filter(
-    (q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
+    (q) => q.difficulty <= difficulty && !isDuplicate(q.text, askedTexts)
   );
   if (candidates.length === 0) return null;
   return { ...pickRandom(candidates), type: 'hr', source: 'hr' };
@@ -598,23 +676,17 @@ function generateHRQuestion(difficulty, askedTexts) {
 
 function generateBehavioralQuestion(difficulty, askedTexts) {
   const candidates = BEHAVIORAL_QUESTIONS.filter(
-    (q) => q.difficulty <= difficulty && !askedTexts.has((q.text || '').toLowerCase().trim())
+    (q) => q.difficulty <= difficulty && !isDuplicate(q.text, askedTexts)
   );
   if (candidates.length === 0) return null;
   return { ...pickRandom(candidates), type: 'behavioral', source: 'behavioral' };
 }
 
 export function generateQuestion({ role, resumeSkills, interviewMemory, currentEmotion }) {
-  const { askedQuestions, scores, questionCount } = interviewMemory;
+  const { askedQuestions, scores } = interviewMemory;
   const askedTexts = new Set(askedQuestions.map((q) => (q.text || '').toLowerCase().trim()));
 
-  if (questionCount >= 8) return null;
-
   let difficulty = getDifficultyFromScores(scores);
-
-  if (currentEmotion === 'Nervous' || currentEmotion === 'Sad' || currentEmotion === 'Angry') {
-    difficulty = Math.max(1, difficulty - 1);
-  }
 
   const questionType = getNextQuestionType(interviewMemory);
 
@@ -649,13 +721,29 @@ export function generateQuestion({ role, resumeSkills, interviewMemory, currentE
   }
 
   if (!question) {
-    question = {
-      id: 'fallback_' + Date.now(),
-      type: 'technical',
-      difficulty: 1,
-      text: 'Can you describe a technical project you have worked on recently?',
-      source: 'fallback',
-    };
+    const rolePool = ROLE_FALLBACKS[role] || ROLE_FALLBACKS['Software Developer'];
+    const skill = (resumeSkills && resumeSkills.length > 0)
+      ? pickRandom(resumeSkills) : pickRandom(ROLE_SKILLS[role] || ['technology']);
+    const filled = rolePool.map((t) => t.replace('{skill}', skill));
+    const available = filled.filter((t) => !askedTexts.has(t.toLowerCase().trim()) && !isDuplicate(t, askedTexts));
+    if (available.length > 0) {
+      question = {
+        id: 'fallback_' + Date.now(),
+        type: 'technical',
+        difficulty: 1,
+        text: pickRandom(available),
+        source: 'role-fallback',
+      };
+    } else {
+      const altSkill = pickRandom(['React', 'Node.js', 'Python', 'Docker', 'AWS', 'APIs', 'databases', 'testing']);
+      question = {
+        id: 'fallback_' + Date.now(),
+        type: 'technical',
+        difficulty: 1,
+        text: `Can you walk me through how you approach building systems with ${altSkill}?`,
+        source: 'fallback',
+      };
+    }
   }
 
   return question;
@@ -691,7 +779,6 @@ export function calculateAnswerScore({ questionText, answerText, questionType, d
   const overlapScore = Math.min(100, (wordOverlap / Math.max(questionWords.length, 1)) * 100);
   const technicalDepth = Math.min(100, (termCount / 5) * 100);
   const confidenceBoost = (confidenceScore || 50) * 0.15;
-  const emotionPenalty = (emotionState === 'Nervous' || emotionState === 'Sad') ? 10 : 0;
 
   let score = Math.round(
     overlapScore * 0.25 +
@@ -704,8 +791,7 @@ export function calculateAnswerScore({ questionText, answerText, questionType, d
   if (difficulty >= 3) score = Math.min(100, score + 5);
   if (difficulty >= 4) score = Math.min(100, score + 5);
 
-  score = Math.max(10, Math.min(100, score - emotionPenalty));
-  return score;
+  return Math.max(10, Math.min(100, score));
 }
 
 export function calculateCommunicationScore(answerText) {
@@ -742,10 +828,6 @@ export function calculateConfidenceFromAnswer(answerText, emotionState) {
   if (assertiveCount > 0) score += 15 * Math.min(3, assertiveCount);
   if (hesitantCount > 0) score -= 15 * Math.min(3, hesitantCount);
 
-  if (emotionState === 'Confident') score += 15;
-  if (emotionState === 'Happy') score += 10;
-  if (emotionState === 'Nervous') score -= 15;
-
   return Math.max(10, Math.min(100, score));
 }
 
@@ -776,7 +858,6 @@ export function createInitialMemory(role, resumeData) {
     askedQuestions: [],
     answers: [],
     scores: { technical: 0, communication: 0, confidence: 0, behavior: 0, semantic: 0, emotion: 0 },
-    questionCount: 0,
     resumeSkills: resumeData?.skills || [],
     skillGaps: [],
   };
