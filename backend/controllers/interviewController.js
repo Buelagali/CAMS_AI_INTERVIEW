@@ -6,12 +6,12 @@ const { analyzeFrame } = require('../services/visionService');
 const { calculateScore } = require('../services/scoringService');
 const { fuseFeatures } = require('../utils/crossAttentionFusion');
 const { getSkillGraphScore } = require('../utils/skillGraph');
-const { processWavBuffer } = require('../services/transcriptionService');
+const { processWavBuffer, getStreamingContext, clearStreamingContext } = require('../services/transcriptionService');
 const adaptiveEngine = require('../services/adaptiveEngine');
+const sessionStore = require('../utils/sessionStore');
+const questionDedup = require('../utils/questionDedup');
 
-const sessions = {};
-
-exports.createSession = (req, res) => {
+exports.createSession = async (req, res) => {
   const { name, email, role, resumeSkills } = req.body;
   const sessionId = uuidv4();
 
@@ -22,7 +22,7 @@ exports.createSession = (req, res) => {
     skillGaps: skillGapResult.skillGap || [],
   });
 
-  sessions[sessionId] = {
+  const session = {
     id: sessionId,
     name,
     email,
@@ -43,11 +43,13 @@ exports.createSession = (req, res) => {
     skillGraphResult: skillGapResult,
   };
 
-  res.json({ sessionId, session: sessions[sessionId] });
+  const created = await sessionStore.createSession(session);
+
+  res.json({ sessionId, session: created });
 };
 
-exports.getSession = (req, res) => {
-  const session = sessions[req.params.sessionId];
+exports.getSession = async (req, res) => {
+  const session = await sessionStore.getSession(req.params.sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   const safeSession = { ...session };
@@ -60,10 +62,9 @@ exports.submitAnswer = async (req, res) => {
   const {
     question, answer, questionType, questionId, difficulty,
     emotionData, videoFrame, audioData,
-    viTResult, audioFeatures,
     skill,
   } = req.body;
-  const session = sessions[sessionId];
+  const session = await sessionStore.getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   let semanticScore = 50;
@@ -162,6 +163,8 @@ exports.submitAnswer = async (req, res) => {
 
   session.currentQuestionIndex = session.answers.length;
 
+  await sessionStore.updateSession(sessionId, session);
+
   const evidence = adaptiveEngine.evaluateEvidence(session.adaptiveState);
 
   res.json({
@@ -180,7 +183,7 @@ exports.submitAnswer = async (req, res) => {
 
 exports.generateFeedback = async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions[sessionId];
+  const session = await sessionStore.getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   const unifiedFeatures = fuseFeatures({
@@ -217,6 +220,8 @@ exports.generateFeedback = async (req, res) => {
   });
 
   session.feedback = feedback;
+  await sessionStore.updateSession(sessionId, session);
+
   res.json({
     scores,
     feedback,
@@ -228,6 +233,9 @@ exports.generateFeedback = async (req, res) => {
       behaviorScore: unifiedFeatures.behaviorScore,
       emotionScore: unifiedFeatures.emotionScore,
       engagementScore: unifiedFeatures.engagementScore,
+      audioScore: unifiedFeatures.audioScore,
+      signalStrength: unifiedFeatures.signalStrength,
+      qualityScores: unifiedFeatures.qualityScores,
     },
   });
 };
@@ -235,13 +243,14 @@ exports.generateFeedback = async (req, res) => {
 exports.submitFrame = async (req, res) => {
   const { sessionId } = req.params;
   const { frame } = req.body;
-  const session = sessions[sessionId];
+  const session = await sessionStore.getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   try {
     const imageBuffer = Buffer.from(frame, 'base64');
     const analysis = await analyzeFrame(imageBuffer);
     session.visionHistory.push(analysis);
+    await sessionStore.updateSession(sessionId, { visionHistory: session.visionHistory });
     res.json({ analysis });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -251,13 +260,14 @@ exports.submitFrame = async (req, res) => {
 exports.submitAudioChunk = async (req, res) => {
   const { sessionId } = req.params;
   const { audio } = req.body;
-  const session = sessions[sessionId];
+  const session = await sessionStore.getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   try {
     const audioBuffer = Buffer.from(audio, 'base64');
     const analysis = await analyzeAudio(audioBuffer);
     session.audioHistory.push(analysis);
+    await sessionStore.updateSession(sessionId, { audioHistory: session.audioHistory });
     res.json({ analysis });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -282,7 +292,7 @@ exports.transcribeAudio = async (req, res) => {
       return res.status(400).json({ error: 'Audio too short' });
     }
 
-    if (audioBuffer[0] !== 0x52 || audioBuffer[1] !== 0x49 || audioBuffer[2] !== 0x46 || audioBuffer[3] !== 0x46) {
+    if (audioBuffer[0] !== 0x52 || audioBuffer[1] !== 0x49 || audioBuffer[2] !== 0x46 || audioBuffer[3] !== 0x49) {
       return res.status(400).json({ error: 'Unsupported audio format - expected WAV' });
     }
 
@@ -312,9 +322,93 @@ exports.transcribeAudio = async (req, res) => {
   }
 };
 
+const pendingChunks = {};
+
+exports.transcribeChunk = async (req, res) => {
+  const { sessionId } = req.params;
+  const { finalize } = req.body;
+
+  if (finalize) {
+    const ctx = getStreamingContext(sessionId);
+    const bestText = ctx
+      ? (ctx.bestChunkText || ctx.lastChunkText)
+      : '';
+    const result = {
+      text: bestText,
+      chunkCount: ctx ? ctx.chunkCount : 0,
+      finalized: true,
+    };
+    clearStreamingContext(sessionId);
+    return res.json(result);
+  }
+
+  let audioBuffer;
+  if (req.file && req.file.buffer) {
+    audioBuffer = req.file.buffer;
+  } else if (req.body && req.body.audio) {
+    audioBuffer = Buffer.from(req.body.audio, 'base64');
+  } else {
+    const ctx = getStreamingContext(sessionId);
+    const preview = ctx
+      ? (ctx.bestChunkText || ctx.lastChunkText)
+      : '';
+    return res.json({
+      text: preview,
+      chunkCount: ctx ? ctx.chunkCount : 0,
+      confidence: ctx ? { overall: Math.round(ctx.bestChunkConfidence * 100) || 50 } : { overall: 0 },
+      streaming: true,
+    });
+  }
+
+  if (audioBuffer.length < 100) {
+    const ctx = getStreamingContext(sessionId);
+    return res.json({
+      text: ctx ? ctx.lastChunkText : '',
+      chunkCount: ctx ? ctx.chunkCount : 0,
+      confidence: ctx ? { overall: 50 } : { overall: 0 },
+      streaming: true,
+      error: 'Audio too short for new transcription, returning accumulated',
+    });
+  }
+
+  try {
+    const options = {
+      noiseReductionStrength: req.body.noiseReductionStrength || 0.5,
+      language: req.body.language || 'en',
+      sessionId,
+      isStreamingChunk: true,
+    };
+
+    const result = await processWavBuffer(audioBuffer, options);
+
+    const ctx = getStreamingContext(sessionId);
+
+    res.json({
+      text: result.text || (ctx ? ctx.lastChunkText : ''),
+      segments: result.segments || [],
+      confidence: result.confidence || { overall: 0 },
+      duration: result.duration,
+      wordCount: result.wordCount || 0,
+      processingTime: result.processingTime,
+      model: result.model,
+      chunkCount: ctx ? ctx.chunkCount : 0,
+      streaming: true,
+    });
+  } catch (err) {
+    console.error('Streaming transcription error:', err.message);
+    const ctx = getStreamingContext(sessionId);
+    res.json({
+      text: ctx ? ctx.lastChunkText : '',
+      confidence: { overall: 0 },
+      error: err.message,
+      streaming: true,
+    });
+  }
+};
+
 exports.getNextQuestion = async (req, res) => {
   const { sessionId } = req.params;
-  const session = sessions[sessionId];
+  const session = await sessionStore.getSession(sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   const evidence = adaptiveEngine.evaluateEvidence(session.adaptiveState);
@@ -324,6 +418,7 @@ exports.getNextQuestion = async (req, res) => {
 
   try {
     const question = await adaptiveEngine.generateQuestion(session.adaptiveState);
+    await sessionStore.updateSession(sessionId, session);
     if (!question) {
       return res.json({
         question: null,
@@ -387,8 +482,24 @@ exports.getQuestions = async (req, res) => {
   res.json({ questions });
 };
 
-exports.getSessionAnalytics = (req, res) => {
-  const session = sessions[req.params.sessionId];
+exports.checkDuplicate = async (req, res) => {
+  const { questionText, previousQuestions } = req.body;
+  if (!questionText || !previousQuestions) {
+    return res.status(400).json({ error: 'Missing questionText or previousQuestions' });
+  }
+
+  const history = previousQuestions.map((t) => ({ text: t }));
+  const isDup = await questionDedup.isDuplicate(questionText, history);
+
+  res.json({
+    isDuplicate: isDup.isDuplicate,
+    similarity: isDup.similarity,
+    method: isDup.method,
+  });
+};
+
+exports.getSessionAnalytics = async (req, res) => {
+  const session = await sessionStore.getSession(req.params.sessionId);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
   res.json({

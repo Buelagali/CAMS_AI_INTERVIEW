@@ -27,6 +27,33 @@ export function extractEmail(text) {
   return match ? match[0] : '';
 }
 
+const SKILL_ALIASES = {
+  'javascript': ['js', 'ecmascript', 'es6', 'es2015', 'es2020'],
+  'typescript': ['ts', 'typed javascript'],
+  'python': ['python3', 'python 3'],
+  'react': ['reactjs', 'react.js', 'react js'],
+  'angular': ['angularjs', 'angular 2', 'angular 4'],
+  'node.js': ['nodejs', 'node', 'node js'],
+  'express': ['expressjs', 'express.js'],
+  'docker': ['dockerize', 'containerization', 'container'],
+  'kubernetes': ['k8s', 'kube'],
+  'aws': ['amazon web services', 'ec2', 's3', 'lambda', 'cloudformation'],
+  'azure': ['microsoft azure'],
+  'gcp': ['google cloud', 'google cloud platform'],
+  'sql': ['mysql', 'postgresql', 'postgres', 'oracle', 'sqlite', 'mariadb'],
+  'nosql': ['mongodb', 'couchdb', 'cassandra', 'dynamodb', 'redis'],
+  'machine learning': ['ml', 'predictive modeling', 'supervised learning', 'unsupervised learning'],
+  'deep learning': ['dl', 'neural network', 'neural networks', 'cnn', 'rnn', 'lstm'],
+  'nlp': ['natural language processing', 'text mining', 'language model'],
+  'tensorflow': ['tf', 'tf2', 'tensor flow'],
+  'pytorch': ['torch', 'py torch'],
+  'scikit-learn': ['sklearn', 'scikit learn'],
+  'terraform': ['infrastructure as code', 'iac'],
+  'ci/cd': ['cicd', 'continuous integration', 'continuous deployment'],
+  'rest': ['rest api', 'restful', 'restapis'],
+  'graphql': ['gql', 'graph ql'],
+};
+
 export function extractSkills(text) {
   const skillKeywords = [
     'JavaScript', 'TypeScript', 'Python', 'Java', 'C++', 'React', 'Angular', 'Vue',
@@ -36,9 +63,28 @@ export function extractSkills(text) {
     'HTML', 'CSS', 'Tailwind', 'Bootstrap', 'Redux', 'Next.js', 'TypeScript',
     'CI/CD', 'Jenkins', 'Terraform', 'Linux', 'Agile', 'Scrum',
   ];
-  return skillKeywords.filter((skill) =>
-    text.toLowerCase().includes(skill.toLowerCase())
-  );
+
+  const lowerText = text.toLowerCase();
+  const found = new Set();
+
+  for (const skill of skillKeywords) {
+    const lowerSkill = skill.toLowerCase();
+    if (lowerText.includes(lowerSkill)) {
+      found.add(skill);
+      continue;
+    }
+    const aliases = SKILL_ALIASES[lowerSkill];
+    if (aliases) {
+      for (const alias of aliases) {
+        if (lowerText.includes(alias)) {
+          found.add(skill);
+          break;
+        }
+      }
+    }
+  }
+
+  return [...found];
 }
 
 export function extractProjects(text) {

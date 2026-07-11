@@ -11,6 +11,7 @@ export default function Result() {
   const scores = JSON.parse(sessionStorage.getItem('finalScores') || '{}');
   const feedback = JSON.parse(sessionStorage.getItem('feedback') || '{}');
   const resumeMatch = JSON.parse(sessionStorage.getItem('resumeMatch') || '{}');
+  const proctoringTermination = JSON.parse(sessionStorage.getItem('proctoringTermination') || '{}');
 
   const [loaded, setLoaded] = useState(false);
 
@@ -80,6 +81,18 @@ export default function Result() {
         </div>
       </div>
 
+      {proctoringTermination.terminated && proctoringTermination.terminationReason && (
+        <div className="card" style={{ marginBottom: 24, textAlign: 'center', padding: '20px 24px', border: '2px solid #ff4757', background: 'rgba(255,71,87,0.08)' }}>
+          <h2 style={{ color: '#ff4757', marginBottom: 8, fontSize: 22 }}>Interview Status: Terminated</h2>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 4 }}>
+            <strong>Reason:</strong> {proctoringTermination.terminationReason}
+          </p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
+            <strong>Termination Type:</strong> {proctoringTermination.terminationType}
+          </p>
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 40 }}>
         <div style={{ position: 'relative', width: 180, height: 180 }}>
           <svg width="180" height="180" viewBox="0 0 180 180">
@@ -148,6 +161,60 @@ export default function Result() {
           </ResponsiveContainer>
         </div>
       </div>
+
+      {/* ── Evaluation Evidence ── */}
+      {scores.evidence && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <h3 style={{ fontSize: 18, marginBottom: 20, color: 'var(--text-secondary)' }}>
+            Evaluation Evidence
+          </h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {[
+              { key: 'technical', label: 'Technical Skills', color: 'var(--accent-1)' },
+              { key: 'communication', label: 'Communication', color: 'var(--accent-2)' },
+              { key: 'confidence', label: 'Confidence & Poise', color: 'var(--accent-4)' },
+              { key: 'behavior', label: 'Behavioral Skills', color: 'var(--accent-3)' },
+              { key: 'emotion', label: 'Emotional Analysis', color: '#f472b6' },
+              { key: 'resumeMatch', label: 'Resume Match', color: '#ff8a5c' },
+            ].filter(e => scores.evidence[e.key]).map(({ key, label, color }) => (
+              <div key={key} style={{
+                padding: '12px 16px',
+                borderRadius: 'var(--radius-sm)',
+                background: `${color}11`,
+                border: `1px solid ${color}22`,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color }}>{label}</span>
+                  <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                    Score: {scores[key] !== undefined ? Math.round(scores[key]) + '%' : 'N/A'}
+                  </span>
+                </div>
+                <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                  {scores.evidence[key]}
+                </p>
+              </div>
+            ))}
+            {scores.evidence.overall && (
+              <div style={{
+                padding: '12px 16px',
+                borderRadius: 'var(--radius-sm)',
+                background: 'linear-gradient(135deg, rgba(108,99,255,0.12), rgba(0,212,170,0.12))',
+                border: '1px solid rgba(108,99,255,0.2)',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Overall Assessment</span>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>
+                    {scores.overall}% &middot; {scores.hiringDecision || 'N/A'}
+                  </span>
+                </div>
+                <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                  {scores.evidence.overall}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {feedback.strengths && <FeedbackCard feedback={feedback} />}
 

@@ -1,0 +1,11 @@
+node_modules/
+.git/
+*.md
+.DS_Store
+backend/datasets/
+backend/training/
+backend/node_modules/
+frontend/node_modules/
+frontend/src/
+**/.gitkeep
+*.log

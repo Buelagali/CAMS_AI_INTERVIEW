@@ -39,7 +39,7 @@ exports.evaluateAnswer = async (question, answer) => {
     const keywordOverlap = cleanQuestion.split(' ').filter((w) =>
       cleanAnswer.includes(w)
     ).length / Math.max(cleanQuestion.split(' ').length, 1);
-    return Math.round(Math.min(100, keywordOverlap * 100 + Math.random() * 20));
+    return Math.round(Math.min(100, keywordOverlap * 100));
   }
 };
 

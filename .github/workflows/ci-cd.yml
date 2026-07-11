@@ -1,0 +1,181 @@
+name: CAMS CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: npm ci
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+      - name: Lint backend
+        working-directory: ./backend
+        run: npx eslint . --ext .js --max-warnings 0 || echo "No ESLint configured"
+      - name: Lint frontend
+        working-directory: ./frontend
+        run: npx eslint . --ext .jsx,.js --max-warnings 0 || echo "No ESLint configured"
+
+  test:
+    name: Run Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+      - name: Run unit tests
+        working-directory: ./backend
+        run: npm test
+      - name: Generate coverage report
+        working-directory: ./backend
+        run: node --test --experimental-test-coverage tests/*.test.js 2>&1 || true
+
+  security-scan:
+    name: Security Scan
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+      - name: Run npm audit
+        working-directory: ./backend
+        run: npm audit --audit-level=high || echo "Vulnerabilities found"
+        continue-on-error: true
+      - name: Run Snyk Security Scan
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check outdated dependencies
+        working-directory: ./backend
+        run: npm outdated || echo "Check dependencies manually"
+        continue-on-error: true
+
+  build:
+    name: Build & Artifact
+    needs: [test, security-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build frontend
+        working-directory: ./frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist/
+          retention-days: 7
+      - name: Build Docker images
+        run: |
+          docker build -t cams-backend:latest -f Dockerfile.backend .
+          docker build -t cams-frontend:latest -f Dockerfile.frontend .
+
+  e2e:
+    name: End-to-End Tests
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        run: |
+          cd backend && npm ci
+          cd ../frontend && npm ci
+      - name: Start services
+        run: |
+          docker compose -f docker-compose.yml up -d redis
+          cd backend && node server.js &
+          sleep 10
+      - name: Install Playwright
+        working-directory: ./e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run E2E tests
+        working-directory: ./e2e
+        run: npx playwright test --reporter=list
+      - name: Upload E2E report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 7
+
+  deploy:
+    name: Deploy
+    needs: [build, e2e]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to production
+        run: |
+          echo "Deployment would be configured here"
+          echo "Example: SSH deploy, Docker registry push, or cloud deployment"
+        # Uncomment and configure for your deployment target:
+        # - name: Deploy via SSH
+        #   uses: appleboy/ssh-action@v1.0.3
+        #   with:
+        #     host: ${{ secrets.DEPLOY_HOST }}
+        #     username: ${{ secrets.DEPLOY_USER }}
+        #     key: ${{ secrets.DEPLOY_KEY }}
+        #     script: |
+        #       cd /opt/cams
+        #       docker compose pull
+        #       docker compose up -d --force-recreate
+
+  notify:
+    name: Notify
+    needs: [deploy, build, test, security-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify status
+        run: |
+          echo "Pipeline status: ${{ needs.deploy.result }}"
+          echo "Build status: ${{ needs.build.result }}"
+          echo "Test status: ${{ needs.test.result }}"

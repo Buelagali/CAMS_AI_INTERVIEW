@@ -1,15 +1,3 @@
-/**
- * Noise Reduction Service
- * 
- * Implements:
- * - Pre-emphasis filtering (boost high frequencies)
- * - Energy-based Voice Activity Detection (VAD)
- * - Spectral noise gating (reduce non-speech noise floor)
- * - Signal-to-Noise Ratio estimation
- * 
- * All operations work on Float32Array audio samples at 16kHz.
- */
-
 function preEmphasis(samples, coefficient = 0.97) {
   const out = new Float32Array(samples.length);
   out[0] = samples[0];
@@ -43,7 +31,7 @@ function detectVoiceActivity(samples, sampleRate = 16000) {
   const noiseFloor = frameEnergies[Math.floor(frameEnergies.length * 0.15)] || 0;
   const signalPeak = frameEnergies[Math.floor(frameEnergies.length * 0.95)] || 0;
 
-  const dynamicThreshold = noiseFloor + (signalPeak - noiseFloor) * 0.15;
+  const dynamicThreshold = noiseFloor + (signalPeak - noiseFloor) * 0.12;
   const vadThreshold = Math.max(dynamicThreshold, 1e-6);
 
   const vad = new Uint8Array(numFrames);
@@ -56,7 +44,7 @@ function detectVoiceActivity(samples, sampleRate = 16000) {
     if (vad[f]) speechFrames++;
   }
 
-  const holdover = 2;
+  const holdover = 6;
   for (let pass = 0; pass < 3; pass++) {
     for (let f = 1; f < numFrames; f++) {
       if (vad[f] && !vad[f - 1]) {
@@ -67,6 +55,18 @@ function detectVoiceActivity(samples, sampleRate = 16000) {
       if (vad[f] && !vad[f + 1]) {
         for (let h = f + 1; h <= Math.min(numFrames - 1, f + holdover); h++) vad[h] = 1;
       }
+    }
+  }
+
+  for (let f = 1; f < numFrames; f++) {
+    if (vad[f - 1] && !vad[f]) {
+      let gapEnd = f;
+      while (gapEnd < numFrames && !vad[gapEnd]) gapEnd++;
+      const gapLen = gapEnd - f;
+      if (gapLen <= 8) {
+        for (let g = f; g < gapEnd; g++) vad[g] = 1;
+      }
+      f = gapEnd;
     }
   }
 

@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import * as pdfjsLib from 'pdfjs-dist';
+import { exactSkillMatch } from '../utils/questionEngine';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -167,8 +168,8 @@ function matchResumeLocally(resumeData, role) {
   };
   const required = roleSkills[role] || roleSkills['Software Developer'];
   const candidateSkills = resumeData.skills || [];
-  const matchedSkills = required.filter((s) => candidateSkills.some((cs) => cs.toLowerCase().includes(s.toLowerCase())));
-  const missingSkills = required.filter((s) => !candidateSkills.some((cs) => cs.toLowerCase().includes(s.toLowerCase())));
+  const matchedSkills = required.filter((s) => candidateSkills.some((cs) => exactSkillMatch(cs, s)));
+  const missingSkills = required.filter((s) => !candidateSkills.some((cs) => exactSkillMatch(cs, s)));
   const skillScore = matchedSkills.length / required.length;
   const experienceScore = Math.min(1, (resumeData.experience || 0) / 2);
   const projectScore = Math.min(1, (resumeData.projects?.length || 0) / 3);

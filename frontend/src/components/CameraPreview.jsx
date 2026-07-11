@@ -11,7 +11,7 @@ const emotionOrder = ['Angry', 'Sad', 'Nervous', 'Neutral', 'Happy', 'Confident'
 const emotionY = {};
 emotionOrder.forEach((e, i) => { emotionY[e] = (emotionOrder.length - 1 - i) * 20 + 10; });
 
-export default function CameraPreview({ videoRef, cameraActive, emotion, emotionScores, emotionHistory, emotionScoresHistory, faceDetected }) {
+export default function CameraPreview({ videoRef, cameraActive, emotion, emotionScores, emotionHistory, emotionScoresHistory, faceDetected, multiFaceWarnings }) {
   const mainEmotion = emotion || 'Neutral';
   const safeHistory = emotionHistory || [];
   const safeScoresHistory = emotionScoresHistory || [];
@@ -107,6 +107,25 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
         >
           <span>{noFace ? 'No Face' : mainEmotion}</span>
         </div>
+
+        {multiFaceWarnings > 0 && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 12,
+              left: 12,
+              padding: '6px 12px',
+              borderRadius: 20,
+              background: 'rgba(255,71,87,0.2)',
+              border: '1px solid #ff4757',
+              fontSize: 12,
+              fontWeight: 600,
+              color: '#ff4757',
+            }}
+          >
+            Multiple Faces Detected
+          </div>
+        )}
       </div>
 
       <div style={{ padding: 16 }}>

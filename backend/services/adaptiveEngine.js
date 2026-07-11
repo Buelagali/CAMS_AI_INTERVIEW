@@ -1,6 +1,7 @@
 const { pipeline } = require('@xenova/transformers');
 const { getSkillGraphScore, getSkillRecommendations } = require('../utils/skillGraph');
 const { evaluateAnswer, getEmbedding, getSimilarity } = require('./bertService');
+const questionDedup = require('../utils/questionDedup');
 
 const DIFFICULTY = { BEGINNER: 1, INTERMEDIATE: 2, ADVANCED: 3, EXPERT: 4 };
 const DIFFICULTY_LABEL = { 1: 'beginner', 2: 'intermediate', 3: 'advanced', 4: 'expert' };
@@ -574,7 +575,7 @@ function selectTargetSkill(state) {
     const unansweredGaps = skillGaps.filter((gap) =>
       !answerHistory.some((a) =>
         (a.skill && gap.toLowerCase().includes(a.skill.toLowerCase())) ||
-        a.text.toLowerCase().includes(gap.toLowerCase())
+        (a.text && a.text.toLowerCase().includes(gap.toLowerCase()))
       )
     );
     if (unansweredGaps.length > 0) {
@@ -942,21 +943,51 @@ async function generateQuestion(state) {
   const difficulty = determineDifficulty(state);
   const targetSkill = selectTargetSkill(state);
 
-  const askedTexts = new Set(state.answerHistory.map((a) => a.text.toLowerCase().trim()));
+  const dedupHistory = (state.askedQuestions || []).map((q) => ({
+    text: q.text,
+    id: q.id,
+    type: q.type,
+    skill: q.skill,
+    difficulty: q.difficulty,
+  }));
 
-  for (let attempt = 0; attempt < 5; attempt++) {
+  const dedupHistoryFallback = (state.answerHistory || []).map((a) => ({
+    text: a.text,
+    id: a.questionId,
+  }));
+
+  const allPrevious = dedupHistory.length > 0 ? dedupHistory : dedupHistoryFallback;
+
+  const attemptConfigs = [
+    { source: 'llm', type: null },
+    { source: 'bank', type: 'hr' },
+    { source: 'bank', type: 'technical' },
+    { source: 'bank', type: 'behavioral' },
+    { source: 'bank', type: 'resume' },
+    { source: 'bank', type: 'adaptive' },
+    { source: 'role-fallback', type: null },
+    { source: 'skill-fallback', type: null },
+  ];
+
+  const MAX_RETRIES = 8;
+  let usedSources = new Set();
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     let text = null;
     let questionType = null;
     let source = null;
 
-    if (attempt === 0) {
+    const configIdx = attempt % attemptConfigs.length;
+    const config = attemptConfigs[configIdx];
+
+    if (config.source === 'llm' && attempt < 2) {
       questionType = selectQuestionType(state);
       text = await generateWithLLM(state, difficulty, targetSkill, questionType);
       source = 'llm';
     }
 
-    if (!text) {
-      questionType = selectQuestionType(state);
+    if (!text && config.source === 'bank') {
+      questionType = config.type || selectQuestionType(state);
       const generated = generateFromOriginalBanks(state, difficulty, targetSkill, questionType);
       if (generated) {
         text = generated.text;
@@ -965,41 +996,58 @@ async function generateQuestion(state) {
       }
     }
 
-    if (!text) {
+    if (!text && config.source === 'role-fallback' && !usedSources.has('role-fallback')) {
+      usedSources.add('role-fallback');
       const rolePool = ROLE_FALLBACKS[state.role] || ROLE_FALLBACKS['Software Developer'];
-      const skill = (state.resumeSkills && state.resumeSkills.length > 0)
-        ? pickRandom(state.resumeSkills) : pickRandom(ROLE_SKILLS[state.role] || ['technology']);
-      const filled = rolePool.map((t) => t.replace('{skill}', skill));
-      const available = filled.filter((t) => !askedTexts.has(t.toLowerCase().trim()));
+      const skillPool = [...(state.resumeSkills || []), ...(state.skillGaps || []), ...(ROLE_SKILLS[state.role] || ['technology'])];
+      const usedSkill = targetSkill || pickRandom(skillPool);
+      const available = rolePool
+        .map((t) => ({ text: t.replace('{skill}', usedSkill), skill: usedSkill }))
+        .filter((q) => {
+          const t = q.text.toLowerCase().trim();
+          return !allPrevious.some((p) => p.text && p.text.toLowerCase().trim() === t);
+        });
       if (available.length > 0) {
-        text = pickRandom(available);
+        const chosen = pickRandom(available);
+        text = chosen.text;
+        questionType = 'technical';
         source = 'role-fallback';
       }
     }
 
-    if (!text) {
-      const skill = (state.resumeSkills && state.resumeSkills.length > 0)
-        ? pickRandom(state.resumeSkills) : pickRandom(ROLE_SKILLS[state.role] || ['technology']);
+    if (!text && config.source === 'skill-fallback' && !usedSources.has('skill-fallback')) {
+      usedSources.add('skill-fallback');
+      const skill = targetSkill || pickRandom([...(state.resumeSkills || []), ...(ROLE_SKILLS[state.role] || ['technology'])]);
       const altPool = [
-        `Can you walk me through how you approach building systems with ${skill}?`,
-        `What experience do you have with ${skill} and how have you applied it in your work?`,
-        `How has your understanding of ${skill} evolved through your projects?`,
-        `What do you find most interesting about working with ${skill}?`,
+        `How do you approach designing and building solutions using ${skill}?`,
+        `What has been your most challenging experience working with ${skill}?`,
+        `How do you stay updated with the latest developments in ${skill}?`,
+        `Can you describe a project where you applied ${skill} to solve a complex problem?`,
+        `What best practices do you follow when working with ${skill}?`,
+        `How do you troubleshoot issues that arise when using ${skill}?`,
       ];
-      const available = altPool.filter((t) => !askedTexts.has(t.toLowerCase().trim()));
+      const available = altPool.filter((t) => {
+        const norm = t.toLowerCase().trim();
+        return !allPrevious.some((p) => p.text && p.text.toLowerCase().trim() === norm);
+      });
       if (available.length > 0) {
         text = pickRandom(available);
+        questionType = 'technical';
         source = 'skill-fallback';
       }
     }
 
     if (text) {
-      const isUnique = await ensureUniqueness(text, state);
-      if (!isUnique) continue;
+      const dedupResult = await questionDedup.isDuplicate(text, allPrevious);
+      if (dedupResult.isDuplicate) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.log(`[DEDUP] Attempt ${attempt + 1}: Duplicate (${(dedupResult.similarity * 100).toFixed(0)}% via ${dedupResult.method}) — "${text.substring(0, 60)}...`);
+        }
+        continue;
+      }
 
       const questionId = `adap_${Date.now()}_${attempt}`;
-
-      return {
+      const question = {
         id: questionId,
         type: questionType || 'technical',
         difficulty,
@@ -1017,10 +1065,25 @@ async function generateQuestion(state) {
           generationMethod: source,
         },
       };
+
+      if (!state.askedQuestions) state.askedQuestions = [];
+      state.askedQuestions.push({
+        id: questionId,
+        text,
+        type: questionType || 'technical',
+        skill: targetSkill || null,
+        difficulty,
+      });
+
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[DEDUP] Question accepted (attempt ${attempt + 1}, source: ${source}): "${text.substring(0, 80)}..."`);
+      }
+
+      return question;
     }
   }
 
-  return {
+  const fallbackQuestion = {
     id: `fallback_${Date.now()}`,
     type: 'technical',
     difficulty: DIFFICULTY.BEGINNER,
@@ -1032,6 +1095,17 @@ async function generateQuestion(state) {
       generationMethod: 'fallback',
     },
   };
+
+  if (!state.askedQuestions) state.askedQuestions = [];
+  state.askedQuestions.push({
+    id: fallbackQuestion.id,
+    text: fallbackQuestion.text,
+    type: 'technical',
+    skill: null,
+    difficulty: DIFFICULTY.BEGINNER,
+  });
+
+  return fallbackQuestion;
 }
 
 function createInitialState({ role, resumeSkills, skillGaps }) {
@@ -1040,6 +1114,7 @@ function createInitialState({ role, resumeSkills, skillGaps }) {
     resumeSkills: resumeSkills || [],
     skillGaps: skillGaps || [],
     answerHistory: [],
+    askedQuestions: [],
     emotionHistory: [],
     scores: { technical: 0, communication: 0, confidence: 0, semantic: 0 },
     currentDifficulty: DIFFICULTY.BEGINNER,
@@ -1050,8 +1125,15 @@ function createInitialState({ role, resumeSkills, skillGaps }) {
 function evaluateEvidence(state) {
   const { answerHistory, emotionHistory, scores, role, resumeSkills, skillGaps } = state;
 
-  if (answerHistory.length < 3) {
-    return { sufficient: false, reason: 'Minimum 3 questions required', coverage: {} };
+  const questionCount = answerHistory.length;
+
+  const MIN_WEAK_QUESTIONS = 6;
+  const MIN_AVERAGE_QUESTIONS = 10;
+  const MIN_STRONG_QUESTIONS = 8;
+  const MAX_QUESTIONS = 18;
+
+  if (questionCount < 5) {
+    return { sufficient: false, reason: 'Gathering initial evidence', coverage: {} };
   }
 
   const coverage = {};
@@ -1064,8 +1146,8 @@ function evaluateEvidence(state) {
   };
 
   const typeCounts = Object.values(coverage.dimensions);
-  const hasVariety = typeCounts.filter((c) => c > 0).length >= 2;
-  const hasDepth = answerHistory.length >= 4;
+  const hasVariety = typeCounts.filter((c) => c > 0).length >= 3;
+  const hasDepth = questionCount >= 6;
 
   coverage.performance = {};
 
@@ -1087,13 +1169,13 @@ function evaluateEvidence(state) {
   coverage.performance.stability = stdDev < 15 ? 'stable' : stdDev < 25 ? 'moderate' : 'volatile';
 
   coverage.performance.trend = 'stable';
-  if (answerHistory.length >= 3) {
-    const firstHalf = answerHistory.slice(0, Math.floor(answerHistory.length / 2));
-    const secondHalf = answerHistory.slice(Math.floor(answerHistory.length / 2));
-    const firstAvg = firstHalf.reduce((s, a) => s + a.score, 0) / firstHalf.length;
-    const secondAvg = secondHalf.reduce((s, a) => s + a.score, 0) / secondHalf.length;
-    if (secondAvg - firstAvg > 10) coverage.performance.trend = 'improving';
-    else if (firstAvg - secondAvg > 10) coverage.performance.trend = 'declining';
+  if (questionCount >= 4) {
+    const recent = answerHistory.slice(-Math.min(6, questionCount));
+    const earlier = answerHistory.slice(0, Math.max(2, Math.floor(questionCount / 2)));
+    const recentAvg = recent.reduce((s, a) => s + a.score, 0) / recent.length;
+    const earlierAvg = earlier.reduce((s, a) => s + a.score, 0) / earlier.length;
+    if (recentAvg - earlierAvg > 10) coverage.performance.trend = 'improving';
+    else if (earlierAvg - recentAvg > 10) coverage.performance.trend = 'declining';
   }
 
   coverage.emotional = {};
@@ -1130,30 +1212,74 @@ function evaluateEvidence(state) {
     coverage.roleFit.totalGaps = skillGaps.length;
   }
 
+  const poorCount = answerHistory.filter((a) => (a.score || 0) < 35).length;
+  const poorRatio = questionCount > 0 ? poorCount / questionCount : 0;
+  const idkCount = answerHistory.filter((a) => {
+    const text = (a.text || '').toLowerCase();
+    return text.includes("i don't know") || text.includes("i'm not sure") ||
+           text.includes("i have no idea") || text === 'pass' || text === 'skip';
+  }).length;
+
+  const isWeak = (avgScore < 40 && poorRatio > 0.35) || (idkCount >= 3 && avgScore < 50);
+  const isStrong = avgScore >= 65 && coverage.performance.stability !== 'volatile' && !isWeak;
+  const isVeryStrong = avgScore >= 80 && coverage.performance.stability === 'stable' && hasVariety;
+
+  const stabilityScore = coverage.performance.stability === 'stable' ? 1.0
+    : coverage.performance.stability === 'moderate' ? 0.6 : 0.2;
+  const varietyScore = hasVariety ? 0.15 : 0;
+  const depthScore = hasDepth ? 0.1 : 0;
+  const countScore = Math.min(1, questionCount / 15);
+  const skillScore = skillsCoverageRatio * 0.15;
+  const trendScore = coverage.performance.trend === 'improving' ? 0.08 : coverage.performance.trend === 'declining' ? -0.05 : 0;
+
+  let evaluationConfidence = Math.min(1,
+    countScore * 0.25 +
+    varietyScore +
+    depthScore +
+    skillScore * 0.12 +
+    stabilityScore * 0.15 +
+    Math.max(0, trendScore)
+  );
+
   let sufficient = false;
   let reason = '';
+  let candidateType = 'average';
 
-  if (hasDepth && hasVariety && coverage.performance.stability === 'stable') {
+  if (questionCount >= MAX_QUESTIONS) {
     sufficient = true;
-    reason = 'Stable performance across multiple dimensions';
-  } else if (answerHistory.length >= 7) {
+    candidateType = 'average';
+    reason = 'I have gathered sufficient information for a thorough evaluation. Thank you for your detailed responses.';
+    evaluationConfidence = 0.9;
+  } else if (isVeryStrong && hasVariety && questionCount >= MIN_STRONG_QUESTIONS && evaluationConfidence >= 0.6) {
     sufficient = true;
-    reason = 'Sufficient depth of assessment';
-  } else if (coverage.performance.trend === 'improving' && hasVariety && answerHistory.length >= 5) {
+    candidateType = 'strong';
+    reason = 'Excellent. I have a clear picture of your capabilities. Thank you for the insightful conversation.';
+    evaluationConfidence = 0.85;
+  } else if (isStrong && hasVariety && hasDepth && questionCount >= MIN_STRONG_QUESTIONS && evaluationConfidence >= 0.65) {
     sufficient = true;
-    reason = 'Clear improving trajectory with dimensional coverage';
-  } else if (coverage.performance.trend === 'declining' && answerHistory.length >= 5) {
+    candidateType = 'strong';
+    reason = 'Thank you. I have sufficient information to complete the evaluation. Well done.';
+  } else if (isStrong && questionCount >= (MIN_STRONG_QUESTIONS + 4)) {
     sufficient = true;
-    reason = 'Consistent declining trend identified';
-  } else if (hasVariety && hasDepth && coverage.roleFit.skillsCoverageRatio >= 0.3) {
+    candidateType = 'strong';
+    reason = 'I appreciate your detailed responses. I now have enough to complete the assessment.';
+  } else if (isWeak && questionCount >= MIN_WEAK_QUESTIONS && evaluationConfidence >= 0.45) {
     sufficient = true;
-    reason = 'Adequate skill coverage across role requirements';
-  } else if (answerHistory.length >= 10) {
+    candidateType = 'weak';
+    reason = 'Thank you for your time. I have gathered sufficient information to complete the evaluation.';
+  } else if (hasVariety && hasDepth && questionCount >= MIN_AVERAGE_QUESTIONS && evaluationConfidence >= 0.65) {
     sufficient = true;
-    reason = 'Maximum assessment depth reached';
+    candidateType = 'average';
+    reason = 'I have collected sufficient responses for a comprehensive evaluation. Thank you.';
+  } else if (hasVariety && hasDepth && questionCount >= (MIN_AVERAGE_QUESTIONS + 3) && evaluationConfidence >= 0.55) {
+    sufficient = true;
+    candidateType = 'average';
+    reason = 'I have enough information to provide a thorough assessment. Thank you for your time.';
   }
 
-  return { sufficient, reason, coverage };
+  coverage.evaluationConfidence = Math.round(evaluationConfidence * 100);
+
+  return { sufficient, reason, coverage, candidateType };
 }
 
 module.exports = {

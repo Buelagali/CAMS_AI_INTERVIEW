@@ -1,33 +1,26 @@
-/**
- * Audio Capture Service
- *
- * Records microphone input using AudioContext API and produces WAV blobs.
- * Replaces raw Web Speech API approach with controlled PCM capture.
- * 
- * Features:
- * - Raw PCM capture via ScriptProcessorNode
- * - WAV encoding (16-bit PCM, mono)
- * - Noise gate (filters out silent segments below threshold)
- * - Auto-level normalization
- * - Duration tracking
- * - Fallback to MediaRecorder if AudioContext fails
- */
-
 let audioContext = null;
 let mediaStream = null;
 let scriptProcessor = null;
 let mediaSource = null;
-let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
 let recordingStartTime = 0;
 let totalSamples = 0;
-let noiseGateCallback = null;
-let useMediaRecorder = false;
 
-const NOISE_GATE_THRESHOLD = 0.008;
+const NOISE_GATE_THRESHOLD = 0.002;
 const SAMPLE_RATE = 16000;
-const CHUNK_INTERVAL_MS = 3000;
+const CHUNK_INTERVAL_MS = 1500;
+const CHUNK_OVERLAP_SAMPLES = SAMPLE_RATE * 0.5;
+const SILENCE_TIMEOUT_MS = 2500;
+const MIN_CHUNK_SAMPLES = SAMPLE_RATE * 0.3;
+
+let lastChunkIndex = 0;
+let processingLock = false;
+let chunkQueue = [];
+let silenceStartTime = 0;
+let onSilenceTimeout = null;
+let droppedChunkCount = 0;
+let chunkLatencyLog = [];
 
 function writeString(view, offset, str) {
   for (let i = 0; i < str.length; i++) {
@@ -42,7 +35,6 @@ export function encodeWAV(samples, sampleRate = SAMPLE_RATE) {
   const blockAlign = numChannels * bitsPerSample / 8;
   const dataSize = samples.length * blockAlign;
   const bufferSize = 44 + dataSize;
-
   const buffer = new ArrayBuffer(bufferSize);
   const view = new DataView(buffer);
 
@@ -52,11 +44,11 @@ export function encodeWAV(samples, sampleRate = SAMPLE_RATE) {
   writeString(view, 12, 'fmt ');
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
+  view.setUint16(22, 1, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
   writeString(view, 36, 'data');
   view.setUint32(40, dataSize, true);
 
@@ -81,6 +73,35 @@ export function applyNoiseGate(samples, threshold = NOISE_GATE_THRESHOLD) {
   return samples;
 }
 
+function applySoftNoiseGate(samples, threshold = NOISE_GATE_THRESHOLD) {
+  const out = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const abs = Math.abs(samples[i]);
+    if (abs < threshold) {
+      out[i] = samples[i] * 0.05;
+    } else {
+      out[i] = samples[i];
+    }
+  }
+  return out;
+}
+
+function detectVoiceActivity(samples, threshold = 0.008) {
+  if (samples.length < 160) return false;
+  const step = Math.max(1, Math.floor(samples.length / 8));
+  let activeFrames = 0;
+  for (let i = 0; i < samples.length; i += step) {
+    const end = Math.min(i + step, samples.length);
+    let maxAbs = 0;
+    for (let j = i; j < end; j++) {
+      const abs = Math.abs(samples[j]);
+      if (abs > maxAbs) maxAbs = abs;
+    }
+    if (maxAbs > threshold) activeFrames++;
+  }
+  return activeFrames >= 2;
+}
+
 export function normalizeAudio(samples, targetPeak = 0.95) {
   let peak = 0;
   for (let i = 0; i < samples.length; i++) {
@@ -102,6 +123,7 @@ export async function startCapture(options = {}) {
     noiseGateThreshold = NOISE_GATE_THRESHOLD,
     autoNormalize = true,
     onChunk = null,
+    onSilence = null,
   } = options;
 
   if (isRecording) {
@@ -109,19 +131,22 @@ export async function startCapture(options = {}) {
     return null;
   }
 
+  lastChunkIndex = 0;
+  processingLock = false;
+  chunkQueue = [];
+  droppedChunkCount = 0;
+  chunkLatencyLog = [];
+  onSilenceTimeout = onSilence || null;
+
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
-        sampleRate: SAMPLE_RATE,
-        channelCount: 1,
+        sampleRate: { ideal: SAMPLE_RATE },
+        channelCount: { ideal: 1 },
       },
     });
-
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-      return startCaptureMediaRecorder(noiseGate, noiseGateThreshold, onChunk);
-    }
 
     return startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNormalize, onChunk);
   } catch (err) {
@@ -131,51 +156,7 @@ export async function startCapture(options = {}) {
   }
 }
 
-async function startCaptureMediaRecorder(noiseGate, noiseGateThreshold, onChunk) {
-  useMediaRecorder = true;
-  recordedChunks = [];
-  recordingStartTime = Date.now();
-
-  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus'
-    : 'audio/webm';
-
-  mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
-
-  mediaRecorder.ondataavailable = (event) => {
-    if (event.data && event.data.size > 0) {
-      recordedChunks.push(event.data);
-    }
-  };
-
-  mediaRecorder.start(100);
-  isRecording = true;
-
-  if (onChunk) {
-    const intervalId = setInterval(() => {
-      if (!isRecording) {
-        clearInterval(intervalId);
-        return;
-      }
-      const totalBlob = new Blob(recordedChunks, { type: mimeType });
-      onChunk({
-        blob: totalBlob,
-        duration: (Date.now() - recordingStartTime) / 1000,
-        totalDuration: (Date.now() - recordingStartTime) / 1000,
-      });
-    }, CHUNK_INTERVAL_MS);
-  }
-
-  return {
-    startTime: recordingStartTime,
-    sampleRate: SAMPLE_RATE,
-    method: 'MediaRecorder',
-  };
-}
-
 async function startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNormalize, onChunk) {
-  useMediaRecorder = false;
-
   audioContext = new (window.AudioContext || window.webkitAudioContext)({
     sampleRate: SAMPLE_RATE,
   });
@@ -188,6 +169,7 @@ async function startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNo
   recordedChunks = [];
   totalSamples = 0;
   recordingStartTime = Date.now();
+  silenceStartTime = 0;
 
   let lastChunkTime = recordingStartTime;
 
@@ -196,21 +178,57 @@ async function startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNo
 
     const inputData = event.inputBuffer.getChannelData(0);
     const processed = noiseGate
-      ? applyNoiseGate(new Float32Array(inputData), noiseGateThreshold)
+      ? applySoftNoiseGate(new Float32Array(inputData), noiseGateThreshold)
       : new Float32Array(inputData);
 
     recordedChunks.push(processed);
     totalSamples += processed.length;
 
-    if (onChunk && Date.now() - lastChunkTime >= CHUNK_INTERVAL_MS) {
+    const hasVoice = detectVoiceActivity(processed, noiseGateThreshold * 4);
+    if (hasVoice) {
+      silenceStartTime = 0;
+    } else if (silenceStartTime === 0) {
+      silenceStartTime = Date.now();
+    } else if (onSilenceTimeout && Date.now() - silenceStartTime > SILENCE_TIMEOUT_MS) {
+      silenceStartTime = Date.now();
+      try { onSilenceTimeout(); } catch (e) { /* ignore */ }
+    }
+
+    if (onChunk && Date.now() - lastChunkTime >= CHUNK_INTERVAL_MS && !processingLock) {
       lastChunkTime = Date.now();
+      processingLock = true;
+      lastChunkIndex++;
+
       const accumulated = getAccumulatedSamples();
-      const wavBlob = encodeWAV(accumulated);
-      onChunk({
+      if (accumulated.length < MIN_CHUNK_SAMPLES) {
+        processingLock = false;
+        return;
+      }
+
+      const normalized = autoNormalize ? normalizeAudio(accumulated) : accumulated;
+      const wavBlob = encodeWAV(normalized);
+      const chunkStart = Date.now();
+
+      const chunkInfo = {
         blob: wavBlob,
-        samples: accumulated,
+        samples: normalized,
         duration: accumulated.length / SAMPLE_RATE,
         totalDuration: totalSamples / SAMPLE_RATE,
+        chunkIndex: lastChunkIndex,
+        timestamp: chunkStart,
+      };
+
+      const promise = Promise.resolve().then(() => {
+        return onChunk(chunkInfo);
+      }).then(() => {
+        const latency = Date.now() - chunkStart;
+        chunkLatencyLog.push({ index: lastChunkIndex, latency, duration: chunkInfo.duration });
+        if (chunkLatencyLog.length > 50) chunkLatencyLog.shift();
+      }).catch((err) => {
+        droppedChunkCount++;
+        console.warn(`[AUDIO-CAPTURE] Chunk ${lastChunkIndex} failed/dropped:`, err?.message || 'unknown error');
+      }).finally(() => {
+        processingLock = false;
       });
     }
   };
@@ -229,7 +247,6 @@ async function startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNo
 
 export function getAccumulatedSamples() {
   if (recordedChunks.length === 0) return new Float32Array(0);
-
   const totalLength = recordedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const result = new Float32Array(totalLength);
   let offset = 0;
@@ -240,94 +257,65 @@ export function getAccumulatedSamples() {
   return result;
 }
 
+export function getChunkStats() {
+  return {
+    droppedChunkCount,
+    totalChunks: lastChunkIndex,
+    latencyLog: chunkLatencyLog.slice(-10),
+    avgLatency: chunkLatencyLog.length > 0
+      ? Math.round(chunkLatencyLog.reduce((s, e) => s + e.latency, 0) / chunkLatencyLog.length)
+      : 0,
+  };
+}
+
 export async function stopCapture() {
   if (!isRecording) return null;
 
   isRecording = false;
-
-  if (useMediaRecorder) {
-    return stopCaptureMediaRecorder();
-  }
 
   const samples = getAccumulatedSamples();
   const duration = samples.length / SAMPLE_RATE;
 
   let processedSamples = samples;
   processedSamples = normalizeAudio(processedSamples);
+
+  const speechDetected = (() => {
+    const threshold = 0.01;
+    let loudSamples = 0;
+    for (let i = 0; i < Math.min(samples.length, SAMPLE_RATE * 2); i++) {
+      if (Math.abs(samples[i]) > threshold) loudSamples++;
+    }
+    return loudSamples > SAMPLE_RATE * 0.02;
+  })();
+
+  if (!speechDetected) {
+    const peak = Math.max(...Array.from(samples).map(Math.abs));
+    if (peak < 0.01) {
+      cleanup();
+      return {
+        blob: encodeWAV(new Float32Array(160)),
+        samples: new Float32Array(160),
+        duration: 0.01,
+        sampleRate: SAMPLE_RATE,
+        timestamp: Date.now(),
+        silence: true,
+      };
+    }
+  }
+
   const wavBlob = encodeWAV(processedSamples);
 
   cleanup();
 
   return {
     blob: wavBlob,
-    samples: samples,
+    samples: processedSamples,
     duration,
     sampleRate: SAMPLE_RATE,
     timestamp: Date.now(),
+    droppedChunks: droppedChunkCount,
+    totalChunks: lastChunkIndex,
   };
-}
-
-async function stopCaptureMediaRecorder() {
-  return new Promise((resolve) => {
-    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
-      cleanup();
-      resolve({ blob: new Blob(), duration: 0, sampleRate: SAMPLE_RATE, timestamp: Date.now() });
-      return;
-    }
-
-    mediaRecorder.onstop = async () => {
-      const rawBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
-      const duration = (Date.now() - recordingStartTime) / 1000;
-
-      try {
-        const arrayBuffer = await rawBlob.arrayBuffer();
-        const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
-        const channelData = audioBuffer.getChannelData(0);
-
-        const downsampled = downsample(channelData, audioBuffer.sampleRate, SAMPLE_RATE);
-        const normalized = normalizeAudio(downsampled);
-        const wavBlob = encodeWAV(normalized);
-        tempCtx.close();
-
-        cleanup();
-        resolve({
-          blob: wavBlob,
-          samples: normalized,
-          duration,
-          sampleRate: SAMPLE_RATE,
-          timestamp: Date.now(),
-          method: 'MediaRecorder',
-        });
-      } catch (err) {
-        console.warn('MediaRecorder decode failed, sending raw blob:', err.message);
-        cleanup();
-        resolve({
-          blob: rawBlob,
-          duration,
-          sampleRate: SAMPLE_RATE,
-          timestamp: Date.now(),
-          method: 'MediaRecorder-raw',
-          rawFormat: mediaRecorder.mimeType,
-        });
-      }
-    };
-
-    mediaRecorder.stop();
-    mediaStream.getTracks().forEach((t) => t.stop());
-  });
-}
-
-function downsample(samples, fromRate, toRate) {
-  if (fromRate === toRate) return new Float32Array(samples);
-  const ratio = fromRate / toRate;
-  const newLength = Math.round(samples.length / ratio);
-  const result = new Float32Array(newLength);
-  for (let i = 0; i < newLength; i++) {
-    const srcIdx = Math.round(i * ratio);
-    result[i] = samples[Math.min(srcIdx, samples.length - 1)];
-  }
-  return result;
 }
 
 export function getRecordingDuration() {
@@ -346,10 +334,6 @@ export function forceStopCapture() {
 
 function cleanup() {
   try {
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-      try { mediaRecorder.stop(); } catch (e) {}
-      mediaRecorder = null;
-    }
     if (scriptProcessor) {
       scriptProcessor.disconnect();
       scriptProcessor = null;
@@ -378,5 +362,8 @@ export function getCaptureStatus() {
     totalSamples,
     duration: totalSamples / SAMPLE_RATE,
     startTime: recordingStartTime,
+    droppedChunks: droppedChunkCount,
+    sentChunks: lastChunkIndex,
+    processingLock,
   };
 }

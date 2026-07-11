@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "5000:5000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=development
+      - PORT=5000
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=cams-dev-secret
+      - JWT_DISABLED=true
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://frontend:80
+      - LOG_DIR=/app/backend/logs
+      - LOG_LEVEL=debug
+      - GPU_DISABLED=true
+    volumes:
+      - ./backend:/app/backend
+      - backend_logs:/app/backend/logs
+      - backend_models:/app/backend/models
+    command: npx nodemon server.js
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html
+
+volumes:
+  backend_logs:
+  backend_models:

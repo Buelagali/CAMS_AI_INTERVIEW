@@ -508,19 +508,95 @@ const SCENARIOS = {
   'Cyber Security Analyst': 'responding to a suspected data breach with potential data exfiltration',
 };
 
+const WORD_FORMS = {
+  'polymorphism': ['polymorphic', 'polymorph'],
+  'inheritance': ['inherit', 'inherits', 'inherited'],
+  'encapsulation': ['encapsulate', 'encapsulates', 'encapsulated'],
+  'abstraction': ['abstract', 'abstracts'],
+  'recursion': ['recursive', 'recursively', 'recurse'],
+  'algorithm': ['algorithms', 'algorithmic'],
+  'database': ['databases', 'db'],
+  'deployment': ['deploy', 'deploys', 'deployed', 'deploying'],
+  'asynchronous': ['async', 'asynchronously'],
+  'synchronous': ['sync', 'synchronously'],
+  'authentication': ['auth', 'authenticate', 'authenticated'],
+  'authorization': ['authorize', 'authorized'],
+  'optimization': ['optimize', 'optimizes', 'optimized', 'optimizing'],
+  'implementation': ['implement', 'implements', 'implemented', 'implementing'],
+  'configuration': ['configure', 'configures', 'configured', 'config'],
+  'integration': ['integrate', 'integrates', 'integrated', 'integrating'],
+  'testing': ['test', 'tests', 'tested'],
+  'debugging': ['debug', 'debugs', 'debugged'],
+  'containerization': ['containerize', 'container', 'containers', 'docker'],
+  'orchestration': ['orchestrate', 'orchestrates', 'kubernetes', 'k8s'],
+};
+
+function normalizeForm(word) {
+  const lower = word.toLowerCase();
+  for (const [base, forms] of Object.entries(WORD_FORMS)) {
+    if (lower === base || forms.includes(lower)) return base;
+  }
+  return lower;
+}
+
 function wordOverlapRatio(a, b) {
-  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
-  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
+  const wordsA = new Set(a.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean).map(normalizeForm));
+  const wordsB = new Set(b.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean).map(normalizeForm));
+  if (wordsA.size === 0 && wordsB.size === 0) return 1;
   const intersection = new Set([...wordsA].filter(w => wordsB.has(w)));
   const union = new Set([...wordsA, ...wordsB]);
   return intersection.size / union.size;
 }
 
+const SIMILARITY_STOPWORDS = new Set(['the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their', 'what', 'which', 'who', 'whom', 'how', 'when', 'where', 'why', 'describe', 'explain', 'tell', 'talk', 'share', 'discuss', 'elaborate', 'please', 'walk', 'provide', 'give', 'about', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'between', 'out', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'just', 'because', 'as', 'until', 'while', 'if', 'let', 'ask']);
+
+function getSignificantWords(text) {
+  return text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean).map(normalizeForm).filter(w => !SIMILARITY_STOPWORDS.has(w) && w.length > 2);
+}
+
+const dedupCache = {};
+
+async function backendDedupCheck(text, askedTexts) {
+  const cacheKey = text.substring(0, 60) + '_' + [...askedTexts].join('|').substring(0, 200);
+  if (dedupCache[cacheKey] !== undefined) return dedupCache[cacheKey];
+  try {
+    const res = await fetch('/api/interview/check-duplicate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        questionText: text,
+        previousQuestions: [...askedTexts],
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      dedupCache[cacheKey] = data;
+      if (data.isDuplicate) {
+        console.log(`[DEDUP] Backend: Duplicate (${(data.similarity * 100).toFixed(0)}% via ${data.method})`);
+      }
+      return data;
+    }
+  } catch {
+    // backend unavailable, use local dedup
+  }
+  return null;
+}
+
 function isDuplicate(text, askedTexts) {
   const t = text.toLowerCase().trim();
+  if (t.length < 5) return true;
   if (askedTexts.has(t)) return true;
+
+  const sigWords = getSignificantWords(t);
+  if (sigWords.length === 0) return askedTexts.size > 0;
+
   for (const asked of askedTexts) {
-    if (wordOverlapRatio(t, asked) > 0.7) return true;
+    const overlap = wordOverlapRatio(t, asked);
+    if (overlap > 0.50) return true;
+
+    const askedSig = getSignificantWords(asked);
+    const commonSig = sigWords.filter(w => askedSig.includes(w));
+    if (commonSig.length >= 2 && commonSig.length >= Math.min(sigWords.length, askedSig.length) * 0.45) return true;
   }
   return false;
 }
@@ -566,7 +642,40 @@ function getNextQuestionType(interviewMemory) {
   return leastAsked[0];
 }
 
-function generateResumeQuestion(resumeSkills, difficulty, askedTexts) {
+function generateResumeQuestion(resumeSkills, resumeProjects, difficulty, askedTexts) {
+  if ((!resumeSkills || resumeSkills.length === 0) && (!resumeProjects || resumeProjects.length === 0)) return null;
+
+  const projectTemplates = [
+    { id: 'res_proj_general', type: 'resume', difficulty: 2, template: 'Tell me about your role and contributions in the {project} project.' },
+    { id: 'res_proj_challenge', type: 'resume', difficulty: 3, template: 'What was the most difficult technical challenge you faced in the {project} project?' },
+    { id: 'res_proj_arch', type: 'resume', difficulty: 4, template: 'How would you redesign the architecture of your {project} project if you were to rebuild it today?' },
+    { id: 'res_proj_team', type: 'resume', difficulty: 2, template: 'How did your team collaborate on the {project} project and what was your specific contribution?' },
+    { id: 'res_proj_impact', type: 'resume', difficulty: 3, template: 'What measurable impact did the {project} project have, and how did you track its success?' },
+  ];
+
+  if (resumeProjects && resumeProjects.length > 0) {
+    const shuffled = shuffleArray(resumeProjects);
+    for (const project of shuffled) {
+      const projName = typeof project === 'string' ? project : (project.name || '');
+      if (!projName) continue;
+      const candidates = projectTemplates.filter(
+        (t) => t.difficulty === difficulty && !isDuplicate(t.template.replace('{project}', projName), askedTexts)
+      );
+      if (candidates.length === 0) continue;
+      const template = pickRandom(candidates);
+      const text = template.template.replace('{project}', projName);
+      if (isDuplicate(text, askedTexts)) continue;
+      return {
+        id: template.id + '_' + projName.toLowerCase().replace(/\s+/g, '_') + '_' + Date.now(),
+        type: template.type,
+        difficulty,
+        text,
+        source: 'resume-project',
+        skill: null,
+      };
+    }
+  }
+
   if (!resumeSkills || resumeSkills.length === 0) return null;
 
   const availableSkills = resumeSkills;
@@ -583,7 +692,7 @@ function generateResumeQuestion(resumeSkills, difficulty, askedTexts) {
       .replace('{skill}', skill);
     if (isDuplicate(text, askedTexts)) continue;
     return {
-      id: template.id + '_' + skill.toLowerCase().replace(/\s+/g, '_'),
+      id: template.id + '_' + skill.toLowerCase().replace(/\s+/g, '_') + '_' + Date.now(),
       type: template.type,
       difficulty,
       text,
@@ -682,71 +791,94 @@ function generateBehavioralQuestion(difficulty, askedTexts) {
   return { ...pickRandom(candidates), type: 'behavioral', source: 'behavioral' };
 }
 
-export function generateQuestion({ role, resumeSkills, interviewMemory, currentEmotion }) {
-  const { askedQuestions, scores } = interviewMemory;
+export async function generateQuestion({ role, resumeSkills, resumeProjects, resumeExperience, interviewMemory, currentEmotion }) {
+  const { askedQuestions, scores, answers } = interviewMemory;
   const askedTexts = new Set(askedQuestions.map((q) => (q.text || '').toLowerCase().trim()));
 
   let difficulty = getDifficultyFromScores(scores);
+  if (resumeExperience >= 5) difficulty = Math.max(difficulty, 2);
+  if (resumeExperience >= 8) difficulty = Math.max(difficulty, 3);
 
-  const questionType = getNextQuestionType(interviewMemory);
+  const recentAnswer = answers && answers.length > 0 ? answers[answers.length - 1] : null;
+  const recentScore = recentAnswer ? (recentAnswer.score || 0) : 0;
 
-  let question = null;
-
-  switch (questionType) {
-    case 'hr':
-      question = generateHRQuestion(difficulty, askedTexts);
-      break;
-    case 'resume':
-      question = generateResumeQuestion(resumeSkills, difficulty, askedTexts);
-      if (!question) question = generateTechnicalQuestion(role, difficulty, askedTexts, null);
-      break;
-    case 'behavioral':
-      question = generateBehavioralQuestion(difficulty, askedTexts);
-      if (!question) question = generateHRQuestion(difficulty, askedTexts);
-      break;
-    case 'adaptive':
-      question = generateAdaptiveQuestion(interviewMemory, difficulty, askedTexts);
-      if (!question) question = generateBehavioralQuestion(difficulty, askedTexts);
-      break;
-    case 'technical':
-    default: {
-      const preferredSkill = resumeSkills && resumeSkills.length > 0
-        ? pickRandom(resumeSkills)
-        : null;
-      question = generateTechnicalQuestion(role, difficulty, askedTexts, preferredSkill);
-      if (!question) question = generateBehavioralQuestion(difficulty, askedTexts);
-      if (!question) question = generateHRQuestion(difficulty, askedTexts);
-      break;
-    }
+  if (recentScore < 30 && difficulty > 1) {
+    difficulty = Math.max(1, difficulty - 1);
+  } else if (recentScore >= 75 && difficulty < 4) {
+    difficulty = Math.min(4, difficulty + 1);
   }
 
-  if (!question) {
-    const rolePool = ROLE_FALLBACKS[role] || ROLE_FALLBACKS['Software Developer'];
-    const skill = (resumeSkills && resumeSkills.length > 0)
-      ? pickRandom(resumeSkills) : pickRandom(ROLE_SKILLS[role] || ['technology']);
-    const filled = rolePool.map((t) => t.replace('{skill}', skill));
-    const available = filled.filter((t) => !askedTexts.has(t.toLowerCase().trim()) && !isDuplicate(t, askedTexts));
-    if (available.length > 0) {
-      question = {
-        id: 'fallback_' + Date.now(),
-        type: 'technical',
-        difficulty: 1,
-        text: pickRandom(available),
-        source: 'role-fallback',
-      };
-    } else {
+  const generators = [
+    () => {
+      const qt = getNextQuestionType(interviewMemory);
+      if (qt === 'hr') return generateHRQuestion(difficulty, askedTexts);
+      if (qt === 'resume') {
+        const q = generateResumeQuestion(resumeSkills, resumeProjects, difficulty, askedTexts);
+        if (q) return q;
+        if (resumeSkills && resumeSkills.length > 0) {
+          const s = resumeSkills[Math.floor(Math.random() * resumeSkills.length)];
+          return { id: 'resume_fb_' + Date.now(), type: 'resume', difficulty, text: `Can you tell me more about your experience with ${s}?`, source: 'resume-fallback', skill: s };
+        }
+      }
+      if (qt === 'behavioral') return generateBehavioralQuestion(difficulty, askedTexts);
+      if (qt === 'adaptive') return generateAdaptiveQuestion(interviewMemory, difficulty, askedTexts);
+      return null;
+    },
+    () => generateTechnicalQuestion(role, difficulty, askedTexts, null),
+    () => generateBehavioralQuestion(difficulty, askedTexts),
+    () => generateHRQuestion(difficulty, askedTexts),
+    () => {
+      const rolePool = ROLE_FALLBACKS[role] || ROLE_FALLBACKS['Software Developer'];
+      const skill = (resumeSkills && resumeSkills.length > 0)
+        ? resumeSkills[Math.floor(Math.random() * resumeSkills.length)]
+        : pickRandom(ROLE_SKILLS[role] || ['technology']);
+      const pool = rolePool.map((t) => ({ text: t.replace('{skill}', skill), skill }));
+      const available = pool.filter((q) => !isDuplicate(q.text, askedTexts));
+      if (available.length > 0) {
+        const chosen = available[Math.floor(Math.random() * available.length)];
+        return { id: 'fallback_' + Date.now(), type: 'technical', difficulty: 1, text: chosen.text, source: 'role-fallback' };
+      }
+      return null;
+    },
+    () => {
       const altSkill = pickRandom(['React', 'Node.js', 'Python', 'Docker', 'AWS', 'APIs', 'databases', 'testing']);
-      question = {
-        id: 'fallback_' + Date.now(),
-        type: 'technical',
-        difficulty: 1,
-        text: `Can you walk me through how you approach building systems with ${altSkill}?`,
-        source: 'fallback',
-      };
+      return { id: 'fallback_' + Date.now(), type: 'technical', difficulty: 1, text: `Can you walk me through how you approach building systems with ${altSkill}?`, source: 'fallback' };
+    },
+  ];
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const genIdx = attempt % generators.length;
+    const question = generators[genIdx]();
+    if (!question) continue;
+
+    if (isDuplicate(question.text, askedTexts)) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[DEDUP] Local reject (attempt ${attempt + 1}): "${question.text.substring(0, 60)}..."`);
+      }
+      continue;
     }
+
+    const backendResult = await backendDedupCheck(question.text, askedTexts);
+    if (backendResult && backendResult.isDuplicate) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[DEDUP] Backend reject (attempt ${attempt + 1}, ${(backendResult.similarity * 100).toFixed(0)}%): "${question.text.substring(0, 60)}..."`);
+      }
+      continue;
+    }
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[DEDUP] Question accepted (attempt ${attempt + 1}): "${question.text.substring(0, 80)}..."`);
+    }
+    return question;
   }
 
-  return question;
+  return {
+    id: 'fallback_' + Date.now(),
+    type: 'technical',
+    difficulty: 1,
+    text: `Describe a technical project you have worked on recently and what you learned from it.`,
+    source: 'fallback',
+  };
 }
 
 export function fetchAdaptiveQuestion(sessionId) {
@@ -795,22 +927,47 @@ export function calculateAnswerScore({ questionText, answerText, questionType, d
 }
 
 export function calculateCommunicationScore(answerText) {
-  const words = answerText.split(' ').filter(Boolean);
-  const sentences = answerText.split(/[.!?]+/).filter((s) => s.trim().length > 0);
-  const avgWordsPerSentence = sentences.length > 0 ? words.length / sentences.length : words.length;
-  const wordLenVariety = words.reduce((sum, w) => sum + w.length, 0) / Math.max(words.length, 1);
-  const fillerWords = ['um', 'uh', 'like', 'basically', 'actually', 'sort of', 'kind of', 'you know', 'i mean'];
-  const fillerCount = fillerWords.filter((fw) => answerText.toLowerCase().includes(fw)).length;
+  const text = (answerText || '').trim();
+  const words = text.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+  const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 0);
 
-  let score = 60;
-  if (avgWordsPerSentence >= 8 && avgWordsPerSentence <= 25) score += 15;
-  else if (avgWordsPerSentence > 25) score -= 10;
+  /* Detect poor answers immediately */
+  const poorPatterns = [
+    /^no$/i, /^nah$/i, /^nope$/i, /^naaku teliyadhu/i,
+    /^i don'?t know$/i, /^i'm not sure$/i, /^not sure$/i,
+    /^i have no idea$/i, /^i can'?t answer$/i, /^pass$/i, /^skip$/i, /^next$/i,
+  ];
+  if (poorPatterns.some((p) => p.test(text))) return Math.max(5, wordCount * 4);
+  if (wordCount <= 2) return Math.max(5, wordCount * 5);
+  if (wordCount <= 5) return 12;
+
+  const avgWordsPerSentence = sentences.length > 0 ? wordCount / sentences.length : wordCount;
+  const wordLenVariety = words.reduce((sum, w) => sum + w.length, 0) / Math.max(wordCount, 1);
+  const fillerWords = ['um', 'uh', 'like', 'basically', 'actually', 'sort of', 'kind of', 'you know', 'i mean'];
+  const fillerCount = fillerWords.filter((fw) => text.toLowerCase().includes(fw)).length;
+  const hasTelugu = /[\u0C00-\u0C7F]/.test(text);
+
+  /* Start low – earn your score */
+  let score = 20;
+  if (wordCount >= 40) score += 25;
+  else if (wordCount >= 20) score += 15;
+  else if (wordCount >= 10) score += 8;
+  else score -= 5;
+
+  if (avgWordsPerSentence >= 6 && avgWordsPerSentence <= 22) score += 15;
+  else if (avgWordsPerSentence > 22) score -= 5;
+
   if (wordLenVariety >= 4) score += 10;
+  else if (wordLenVariety >= 3) score += 5;
+
   if (fillerCount === 0) score += 10;
   else if (fillerCount <= 2) score += 5;
   else score -= 10 * Math.min(5, fillerCount);
 
-  return Math.max(10, Math.min(100, score));
+  if (hasTelugu) score = Math.min(score, 35);
+
+  return Math.max(5, Math.min(100, score));
 }
 
 export function calculateConfidenceFromAnswer(answerText, emotionState) {
@@ -867,9 +1024,18 @@ export function getSkillGraph(role) {
   return ROLE_SKILLS[role] || ROLE_SKILLS['Software Developer'];
 }
 
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function exactSkillMatch(candidateSkill, requiredSkill) {
+  const escaped = escapeRegex(requiredSkill);
+  return new RegExp('(^|\\W)' + escaped + '(\\W|$)', 'i').test(candidateSkill);
+}
+
 export function getMissingSkills(role, resumeSkills) {
   const required = ROLE_SKILLS[role] || ROLE_SKILLS['Software Developer'];
   return required.filter(
-    (s) => !resumeSkills.some((rs) => rs.toLowerCase().includes(s.toLowerCase()))
+    (s) => !resumeSkills.some((rs) => exactSkillMatch(rs, s))
   );
 }
