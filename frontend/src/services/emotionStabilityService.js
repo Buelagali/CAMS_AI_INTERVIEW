@@ -8,7 +8,10 @@ const EMOTION_VALENCE = {
 };
 
 export function analyzeEmotionStability({ emotionHistory, emotionScoresHistory, confidenceHistory, answers }) {
+  console.debug(`[EmotionStability] inputs: emotionHistory=${emotionHistory?.length ?? 0}, emotionScoresHistory=${emotionScoresHistory?.length ?? 0}, confidenceHistory=${confidenceHistory?.length ?? 0}, answers=${answers?.length ?? 0}`);
+
   if (!emotionHistory || emotionHistory.length === 0) {
+    console.debug('[EmotionStability] no emotion data, returning score=0');
     return {
       score: 0,
       evidence: ['No emotion data captured during the interview.'],
@@ -53,6 +56,8 @@ export function analyzeEmotionStability({ emotionHistory, emotionScoresHistory, 
     fluctuationScore,
     recoveryAbility,
   });
+
+  console.debug(`[EmotionStability] n=${n}, sub-scores:`, { sequenceStability, confidenceStability, stressTrend, nervousnessTrend, confidenceTrend, engagementTrend, fluctuationScore, recoveryAbility, weightScore: score.toFixed(1) });
 
   return {
     score: Math.round(Math.max(0, Math.min(100, score))),
@@ -271,7 +276,7 @@ function analyzeEngagementTrend(history, confidenceHistory) {
   let engagementFromConfidence = 50;
   if (confidenceHistory && confidenceHistory.length >= 2) {
     const avgConf = confidenceHistory.reduce((a, b) => a + b, 0) / confidenceHistory.length;
-    engagementFromConfidence = avgConf * 100;
+    engagementFromConfidence = avgConf;
 
     if (confidenceHistory.length >= 4) {
       const firstHalf = confidenceHistory.slice(0, Math.floor(confidenceHistory.length / 2));

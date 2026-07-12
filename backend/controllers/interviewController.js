@@ -6,6 +6,7 @@ const { analyzeFrame } = require('../services/visionService');
 const { calculateScore } = require('../services/scoringService');
 const { fuseFeatures } = require('../utils/crossAttentionFusion');
 const { getSkillGraphScore } = require('../utils/skillGraph');
+const { matchResumeToJob } = require('../services/jobMatchService');
 const { processWavBuffer, getStreamingContext, clearStreamingContext } = require('../services/transcriptionService');
 const adaptiveEngine = require('../services/adaptiveEngine');
 const sessionStore = require('../utils/sessionStore');
@@ -61,7 +62,7 @@ exports.submitAnswer = async (req, res) => {
   const { sessionId } = req.params;
   const {
     question, answer, questionType, questionId, difficulty,
-    emotionData, videoFrame, audioData,
+    emotionData, allFaces, videoFrame, audioData,
     skill,
   } = req.body;
   const session = await sessionStore.getSession(sessionId);
@@ -108,12 +109,20 @@ exports.submitAnswer = async (req, res) => {
     semanticScore,
     confidenceScore,
     emotionData: emotionData || visionAnalysis?.scores || null,
+    allFaces: allFaces || null,
     audioAnalysis,
     visionAnalysis,
     timestamp: new Date(),
   };
   session.answers.push(answerRecord);
   if (emotionData) session.emotionHistory.push(emotionData);
+  if (allFaces && Array.isArray(allFaces)) {
+    if (!session.allFacesHistory) session.allFacesHistory = [];
+    session.allFacesHistory.push({
+      timestamp: new Date(),
+      faces: allFaces,
+    });
+  }
   if (confidenceScore) session.confidenceHistory.push(confidenceScore);
 
   if (visionAnalysis?.behavior) {
@@ -201,10 +210,19 @@ exports.generateFeedback = async (req, res) => {
     session.role || ''
   );
 
+  let roleMatchScore = 0;
+  try {
+    const matchResult = await matchResumeToJob(session.resumeData || {}, session.role || '');
+    roleMatchScore = matchResult.matchScore || 0;
+  } catch (err) {
+    console.warn('Role match computation failed:', err.message);
+  }
+
   const scores = calculateScore({
     answers: session.answers,
     resumeMatch: session.resumeMatchScore || skillGraphResult.score || 0,
     skillGraph: skillGraphResult.score || 0,
+    roleMatch: roleMatchScore,
     unified: unifiedFeatures,
   });
 

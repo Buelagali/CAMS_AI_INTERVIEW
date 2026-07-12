@@ -1,4 +1,4 @@
-exports.calculateScore = ({ answers, resumeMatch, skillGraph, unified }) => {
+exports.calculateScore = ({ answers, resumeMatch, skillGraph, roleMatch, unified }) => {
   const technicalScores = answers
     .filter((a) => a.questionType === 'technical' || a.questionType === 'adaptive')
     .map((a) => a.semanticScore || 0);
@@ -135,6 +135,7 @@ exports.calculateScore = ({ answers, resumeMatch, skillGraph, unified }) => {
   const resumeMatchFinal = Math.round(resumeMatchScore * 0.6 + skillGraphScore * 0.4);
   const semanticFinal = Math.round(avgSemantic);
   const emotionFinal = Math.round(avgEmotion * (0.5 + 0.5 * unifiedEmotion));
+  const roleMatchFinal = Math.round(roleMatch || 0);
 
   const overall = Math.round(
     technicalFinal * technicalWeight +
@@ -143,7 +144,8 @@ exports.calculateScore = ({ answers, resumeMatch, skillGraph, unified }) => {
     behaviorFinal * behaviorWeight +
     resumeMatchFinal * resumeMatchWeight +
     semanticFinal * semanticWeight +
-    emotionFinal * emotionWeight
+    emotionFinal * emotionWeight +
+    roleMatchFinal * roleMatchWeight
   );
 
   const evidence = {
@@ -174,6 +176,7 @@ exports.calculateScore = ({ answers, resumeMatch, skillGraph, unified }) => {
     skillGraph: Math.min(100, Math.max(0, skillGraphScore)),
     semantic: Math.min(100, Math.max(0, semanticFinal)),
     emotion: Math.min(100, Math.max(0, emotionFinal)),
+    roleMatch: Math.min(100, Math.max(0, roleMatchFinal)),
     overall: Math.min(100, Math.max(0, overall)),
     avgDifficulty: Math.round(avgDifficulty * 100) / 100,
     difficultyBonus: Math.round(difficultyBonus * 100) / 100,
@@ -199,6 +202,7 @@ exports.calculateScore = ({ answers, resumeMatch, skillGraph, unified }) => {
       resumeMatch: resumeMatchWeight,
       semantic: semanticWeight,
       emotion: emotionWeight,
+      roleMatch: roleMatchWeight,
     },
   };
 };

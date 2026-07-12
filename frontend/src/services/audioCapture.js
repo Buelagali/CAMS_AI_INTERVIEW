@@ -14,13 +14,16 @@ const CHUNK_OVERLAP_SAMPLES = SAMPLE_RATE * 0.5;
 const SILENCE_TIMEOUT_MS = 2500;
 const MIN_CHUNK_SAMPLES = SAMPLE_RATE * 0.3;
 
-let lastChunkIndex = 0;
-let processingLock = false;
-let chunkQueue = [];
-let silenceStartTime = 0;
-let onSilenceTimeout = null;
-let droppedChunkCount = 0;
-let chunkLatencyLog = [];
+const FFT_SIZE = 512;
+const FFT_HOP = 256;
+const NOISE_FLOOR_PERCENTILE = 0.15;
+const NOISE_HISTORY_LEN = 20;
+const SNR_VOICE_THRESHOLD = 6;
+const SNR_FRAME_RATIO = 0.3;
+
+let noiseHistory = [];
+let noiseFloor = null;
+let spectralGateState = {};
 
 function writeString(view, offset, str) {
   for (let i = 0; i < str.length; i++) {
@@ -73,33 +76,106 @@ export function applyNoiseGate(samples, threshold = NOISE_GATE_THRESHOLD) {
   return samples;
 }
 
-function applySoftNoiseGate(samples, threshold = NOISE_GATE_THRESHOLD) {
-  const out = new Float32Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    const abs = Math.abs(samples[i]);
-    if (abs < threshold) {
-      out[i] = samples[i] * 0.05;
-    } else {
-      out[i] = samples[i];
-    }
+function hanningWindow(size) {
+  const w = new Float64Array(size);
+  for (let i = 0; i < size; i++) {
+    w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (size - 1)));
   }
-  return out;
+  return w;
 }
 
-function detectVoiceActivity(samples, threshold = 0.008) {
-  if (samples.length < 160) return false;
-  const step = Math.max(1, Math.floor(samples.length / 8));
-  let activeFrames = 0;
-  for (let i = 0; i < samples.length; i += step) {
-    const end = Math.min(i + step, samples.length);
-    let maxAbs = 0;
-    for (let j = i; j < end; j++) {
-      const abs = Math.abs(samples[j]);
-      if (abs > maxAbs) maxAbs = abs;
+const HANN = hanningWindow(FFT_SIZE);
+
+function fft(real, imag) {
+  const n = real.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [real[i], real[j]] = [real[j], real[i]];
+      [imag[i], imag[j]] = [imag[j], imag[i]];
     }
-    if (maxAbs > threshold) activeFrames++;
   }
-  return activeFrames >= 2;
+  for (let len = 2; len <= n; len <<= 1) {
+    const angle = -2 * Math.PI / len;
+    const wr0 = Math.cos(angle);
+    const wi0 = Math.sin(angle);
+    for (let i = 0; i < n; i += len) {
+      let wr = 1, wi = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const ti = real[i + j + len / 2] * wr - imag[i + j + len / 2] * wi;
+        const tq = real[i + j + len / 2] * wi + imag[i + j + len / 2] * wr;
+        real[i + j + len / 2] = real[i + j] - ti;
+        imag[i + j + len / 2] = imag[i + j] - tq;
+        real[i + j] += ti;
+        imag[i + j] += tq;
+        const nwr = wr * wr0 - wi * wi0;
+        wi = wr * wi0 + wi * wr0;
+        wr = nwr;
+      }
+    }
+  }
+}
+
+function computeMagnitudeSpectrum(samples, offset) {
+  const real = new Float64Array(FFT_SIZE);
+  const imag = new Float64Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    const s = samples[offset + i];
+    real[i] = (s !== undefined ? s : 0) * HANN[i];
+  }
+  fft(real, imag);
+  const mag = new Float64Array(FFT_SIZE / 2 + 1);
+  for (let i = 0; i <= FFT_SIZE / 2; i++) {
+    mag[i] = Math.sqrt(real[i] * real[i] + imag[i] * imag[i]);
+  }
+  return mag;
+}
+
+function updateNoiseFloor(mag) {
+  noiseHistory.push(mag);
+  if (noiseHistory.length > NOISE_HISTORY_LEN) {
+    noiseHistory.shift();
+  }
+  if (noiseHistory.length < 5) return;
+  const numBins = noiseHistory[0].length;
+  const floor = new Float64Array(numBins);
+  for (let b = 0; b < numBins; b++) {
+    const values = noiseHistory.map(m => m[b]).sort((a, b) => a - b);
+    const idx = Math.floor(values.length * NOISE_FLOOR_PERCENTILE);
+    floor[b] = values[Math.min(idx, values.length - 1)];
+  }
+  noiseFloor = floor;
+}
+
+function computeFrameSNR(mag) {
+  if (!noiseFloor) return 0;
+  let sigPow = 0, noisePow = 0;
+  for (let i = 0; i < mag.length; i++) {
+    sigPow += mag[i] * mag[i];
+    noisePow += noiseFloor[i] * noiseFloor[i];
+  }
+  return 10 * Math.log10(sigPow / Math.max(noisePow, 1e-10));
+}
+
+function detectVoiceActivity(samples) {
+  if (samples.length < FFT_SIZE) return false;
+  const numFrames = Math.max(1, Math.floor((samples.length - FFT_SIZE) / FFT_HOP) + 1);
+  let highSnrFrames = 0;
+  for (let f = 0; f < numFrames; f++) {
+    const offset = f * FFT_HOP;
+    const mag = computeMagnitudeSpectrum(samples, offset);
+    if (noiseHistory.length < NOISE_HISTORY_LEN) {
+      updateNoiseFloor(mag);
+      highSnrFrames++;
+      continue;
+    }
+    const snr = computeFrameSNR(mag);
+    if (snr > SNR_VOICE_THRESHOLD) highSnrFrames++;
+    updateNoiseFloor(mag);
+  }
+  return highSnrFrames / numFrames >= SNR_FRAME_RATIO;
 }
 
 export function normalizeAudio(samples, targetPeak = 0.95) {
@@ -184,7 +260,7 @@ async function startCaptureScriptProcessor(noiseGate, noiseGateThreshold, autoNo
     recordedChunks.push(processed);
     totalSamples += processed.length;
 
-    const hasVoice = detectVoiceActivity(processed, noiseGateThreshold * 4);
+    const hasVoice = detectVoiceActivity(processed);
     if (hasVoice) {
       silenceStartTime = 0;
     } else if (silenceStartTime === 0) {

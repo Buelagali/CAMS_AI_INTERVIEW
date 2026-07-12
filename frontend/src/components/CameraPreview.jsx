@@ -11,7 +11,7 @@ const emotionOrder = ['Angry', 'Sad', 'Nervous', 'Neutral', 'Happy', 'Confident'
 const emotionY = {};
 emotionOrder.forEach((e, i) => { emotionY[e] = (emotionOrder.length - 1 - i) * 20 + 10; });
 
-export default function CameraPreview({ videoRef, cameraActive, emotion, emotionScores, emotionHistory, emotionScoresHistory, faceDetected, multiFaceWarnings }) {
+export default function CameraPreview({ videoRef, cameraActive, emotion, emotionScores, emotionHistory, emotionScoresHistory, faceDetected, multiFaceWarnings, allFaces }) {
   const mainEmotion = emotion || 'Neutral';
   const safeHistory = emotionHistory || [];
   const safeScoresHistory = emotionScoresHistory || [];
@@ -128,6 +128,44 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
         )}
       </div>
 
+      {allFaces && allFaces.length > 1 && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: 240, pointerEvents: 'none' }}>
+          {allFaces.map((face) => (
+            <div
+              key={face.id}
+              title={`Face ${face.id}: ${face.emotion} (${Math.round(face.score * 100)}%)`}
+              style={{
+                position: 'absolute',
+                left: `${face.box.x / 1.28}px`,
+                top: `${face.box.y / 1.28}px`,
+                width: `${face.box.width / 1.28}px`,
+                height: `${face.box.height / 1.28}px`,
+                border: '2px solid var(--accent-4)',
+                borderRadius: 4,
+                boxSizing: 'border-box',
+              }}
+            >
+              <span
+                style={{
+                  position: 'absolute',
+                  top: -20,
+                  left: 0,
+                  padding: '2px 6px',
+                  borderRadius: 4,
+                  background: 'rgba(0,0,0,0.7)',
+                  fontSize: 10,
+                  color: '#fff',
+                  whiteSpace: 'nowrap',
+                  pointerEvents: 'none',
+                }}
+              >
+                #{face.id} {face.emotion}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ padding: 16 }}>
         <h4 style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
           Emotion Analysis
@@ -137,7 +175,10 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
             <p style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: 8 }}>
               Position your face in the camera
             </p>
-          ) : (Object.entries(emotionScores || {}).map(([em, score]) => (
+          ) : (Object.entries(emotionScores || {})
+            .filter(([em]) => !em.startsWith('_'))
+            .sort(([a], [b]) => emotionOrder.indexOf(a) - emotionOrder.indexOf(b))
+            .map(([em, score]) => (
             <div key={em} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 12, width: 70, color: em === mainEmotion ? emotionColors[em] : 'var(--text-muted)' }}>
                 {em}
@@ -163,6 +204,32 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
               </div>
             </div>
           )))}
+          {emotionScores?._rawHappy !== undefined && (
+            <details style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
+              <summary style={{ cursor: 'pointer', userSelect: 'none' }}>Raw expression scores</summary>
+              <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {[
+                  ['happy', emotionScores._rawHappy],
+                  ['neutral', emotionScores._rawNeutral],
+                  ['sad', emotionScores._rawSad],
+                  ['fearful', emotionScores._rawFearful],
+                  ['angry', emotionScores._rawAngry],
+                  ['surprised', emotionScores._rawSurprised],
+                  ['disgusted', emotionScores._rawDisgusted],
+                ].map(([label, val]) => (
+                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <span>{label}</span>
+                    <span style={{ fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
+                      {(val * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                ))}
+                <div style={{ borderTop: '1px solid rgba(0,0,0,0.08)', marginTop: 2, paddingTop: 2, fontWeight: 500 }}>
+                  → {mainEmotion}
+                </div>
+              </div>
+            </details>
+          )}
         </div>
 
         {safeHistory.length > 1 && (

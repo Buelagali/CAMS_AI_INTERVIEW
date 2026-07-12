@@ -1,24 +1,187 @@
 import * as faceapi from '@vladmandic/face-api';
 
+import {
+  FACE_CONFIDENCE_THRESHOLD,
+  EMOTION_CONFIDENCE_THRESHOLD,
+  INPUT_SIZE_FACE,
+  INPUT_SIZE_EMOTION,
+  PRESENCE_HISTORY_LEN,
+  PRESENCE_MAJORITY_RATIO,
+  MULTI_FACE_HISTORY_LEN,
+  MULTI_FACE_MAJORITY,
+  MULTI_FACE_COOLDOWN_MS,
+  EMA_ALPHA,
+  LOW_LIGHT_THRESHOLD,
+  BLUR_THRESHOLD,
+  FRAME_QUALITY_PENALTY,
+  LOCK_TIMEOUT_MS,
+  IOU_THRESHOLD,
+  MAX_TRACK_AGE,
+  NO_FACE_TIMEOUT_MS,
+  MISSED_FRAME_LIMIT,
+  VOTE_WINDOW_SIZE,
+} from './faceDetectionConfig.js';
+
 const MODEL_URL = '/face-api-models/';
 
+// ── Model loading state ──
 let loaded = false;
 let loadingAttempted = false;
 
-const EMA_ALPHA = 0.35;
-let smoothedScores = null;
-let lastRawResult = null;
+// ── Separate processing locks for emotion & face detection ──
+// Previously a single shared lock caused detectFaces to return stale
+// results when detectEmotion was processing. Separate locks allow
+// both to run concurrently without cascading failures.
+let emotionLock = false;
+let emotionLockTime = 0;
+let facesLock = false;
+let facesLockTime = 0;
 
-const MULTI_FACE_COOLDOWN_MS = 2500;
+// ── Temporal presence buffer ──
+// Uses PRESENCE_HISTORY_LEN (8) frames. A face is considered present
+// only when PRESENCE_MAJORITY_RATIO (62.5%) of recent frames detected
+// it. This prevents brief detection flickers from triggering warnings.
+let presenceHistory = [];
+
+function updatePresence(rawDetected) {
+  presenceHistory.push(rawDetected);
+  if (presenceHistory.length > PRESENCE_HISTORY_LEN) {
+    presenceHistory.shift();
+  }
+}
+
+function getSmoothedPresence() {
+  if (presenceHistory.length === 0) return false;
+  const count = presenceHistory.filter(Boolean).length;
+  const needed = Math.ceil(PRESENCE_HISTORY_LEN * PRESENCE_MAJORITY_RATIO);
+  return count >= needed;
+}
+
+// ── Multi-face temporal buffer ──
+let multiFaceHistory = [];
 let lastMultiFaceTime = 0;
 let multiFaceConfirmations = 0;
 
-let frameQualityStats = {
-  lastBrightness: -1,
-  lastBlurMetric: -1,
-  consecutiveLowQuality: 0,
-};
+function updateMultiFaceHistory(rawCount) {
+  multiFaceHistory.push(rawCount);
+  if (multiFaceHistory.length > MULTI_FACE_HISTORY_LEN) {
+    multiFaceHistory.shift();
+  }
+}
 
+function isMultiFaceStable() {
+  if (multiFaceHistory.length < 2) return false;
+  const multiCount = multiFaceHistory.filter(c => c > 1).length;
+  return multiCount >= MULTI_FACE_MAJORITY;
+}
+
+// ── Emotion majority-vote history ──
+// Records the raw dominant emotion label from each frame so the
+// displayed emotion is the majority over VOTE_WINDOW_SIZE (3) frames.
+// This is more stable than EMA-smoothed scores because it requires a
+// sustained change (majority of the window) before the label flips.
+let emotionVoteHistory = [];
+let noFaceVoteFrames = 0;
+
+// ── Face-loss hold state ──
+// When the face is temporarily lost, keep returning the last reliable
+// emotion and scores for up to HOLD_DURATION_MS so the UI doesn't
+// flicker to Neutral on brief interruptions.
+let lastFaceTime = Date.now();
+let holdEmotion = 'Neutral';
+let holdScores = { Happy: 0, Neutral: 1, Sad: 0, Nervous: 0, Angry: 0, Confident: 0 };
+let holdActive = false;
+const HOLD_DURATION_MS = 2000;
+
+function recordEmotionVote(emotion) {
+  emotionVoteHistory.push(emotion);
+  if (emotionVoteHistory.length > VOTE_WINDOW_SIZE) {
+    emotionVoteHistory.shift();
+  }
+}
+
+function getMajorityEmotion() {
+  if (emotionVoteHistory.length === 0) return 'Neutral';
+  const counts = {};
+  for (const e of emotionVoteHistory) {
+    counts[e] = (counts[e] || 0) + 1;
+  }
+  let maxCount = 0;
+  let maxEmotion = 'Neutral';
+  for (const [em, count] of Object.entries(counts)) {
+    if (count > maxCount) {
+      maxCount = count;
+      maxEmotion = em;
+    }
+  }
+  return maxEmotion;
+}
+
+function getVoteDistribution() {
+  const counts = {};
+  for (const e of emotionVoteHistory) {
+    counts[e] = (counts[e] || 0) + 1;
+  }
+  return counts;
+}
+
+// ── Per-face tracker state ──
+let faceTracks = new Map();
+let nextFaceId = 0;
+
+// ── Frame monitoring ──
+// Tracks frame timestamps to detect FPS drops, frame reads failures, etc.
+let lastFrameTimestamps = [];
+let frameReadErrors = 0;
+let consecutiveFrameDrops = 0;
+
+function recordFrameCapture(success) {
+  if (success) {
+    lastFrameTimestamps.push(Date.now());
+    if (lastFrameTimestamps.length > 30) lastFrameTimestamps.shift();
+    consecutiveFrameDrops = 0;
+  } else {
+    consecutiveFrameDrops++;
+  }
+}
+
+function getEffectiveFps() {
+  if (lastFrameTimestamps.length < 2) return 0;
+  const window = lastFrameTimestamps.slice(-10);
+  if (window.length < 2) return 0;
+  const elapsed = window[window.length - 1] - window[0];
+  return elapsed > 0 ? ((window.length - 1) / elapsed * 1000).toFixed(1) : 0;
+}
+
+// ── Debug logging helper ──
+let lastLogTime = 0;
+const LOG_INTERVAL_MS = 10000; // Log summary every 10s
+
+function logDiagnostics(faceDetected, faceCount, warningCount, terminationReason,
+  emotion, confidence, finalEmotion) {
+  const now = Date.now();
+  if (now - lastLogTime < LOG_INTERVAL_MS) return;
+  lastLogTime = now;
+  const fps = getEffectiveFps();
+  const present = getSmoothedPresence();
+  const voteDist = getVoteDistribution();
+  console.debug(
+    `[FaceDiag]` +
+    ` FPS:${fps}` +
+    ` present:${present}` +
+    ` faceDetected:${faceDetected}` +
+    ` faceCount:${faceCount}` +
+    ` frameDrops:${consecutiveFrameDrops}` +
+    ` warningCount:${warningCount}` +
+    ` terminationReason:${terminationReason || 'none'}` +
+    ` emotion:${emotion || '?'}` +
+    ` confidence:${confidence != null ? confidence.toFixed(3) : '?'}` +
+    ` final:${finalEmotion || '?'}` +
+    ` votes:${JSON.stringify(voteDist)}`
+  );
+}
+
+// ── Model loading with retry ──
 export async function loadModels() {
   if (loaded || loadingAttempted) return;
   loadingAttempted = true;
@@ -27,7 +190,12 @@ export async function loadModels() {
       await faceapi.nets.tinyFaceDetector.load(MODEL_URL);
       await faceapi.nets.faceExpressionNet.load(MODEL_URL);
       loaded = true;
-      resetSmoothing();
+      resetDetectionState();
+      // Optimistic presence: fill buffer so first frames don't trigger
+      // false "No Face" during initial warmup
+      for (let i = 0; i < PRESENCE_HISTORY_LEN; i++) {
+        presenceHistory.push(true);
+      }
       return;
     } catch (err) {
       console.warn(`Face-api model load attempt ${attempt}/3 failed:`, err.message);
@@ -37,49 +205,48 @@ export async function loadModels() {
   console.error('Face-api models failed to load after 3 attempts');
 }
 
-function resetSmoothing() {
-  smoothedScores = null;
-  lastRawResult = null;
-  lastMultiFaceTime = 0;
-  multiFaceConfirmations = 0;
-  frameQualityStats = { lastBrightness: -1, lastBlurMetric: -1, consecutiveLowQuality: 0 };
+// ── State management ──
+function resetLegacySmoothing() {
+  // clear legacy state that used a shared lock variable
+  emotionLock = false;
+  emotionLockTime = 0;
+  facesLock = false;
+  facesLockTime = 0;
+  lastFrameTimestamps = [];
+  frameReadErrors = 0;
+  consecutiveFrameDrops = 0;
+  // per-face trackers (cleared in resetDetectionState)
 }
 
-function applyTemporalSmoothing(rawScores) {
-  if (!smoothedScores) {
-    smoothedScores = { ...rawScores };
-    return smoothedScores;
-  }
-  const result = {};
-  for (const key of Object.keys(rawScores)) {
-    const prev = smoothedScores[key] !== undefined ? smoothedScores[key] : rawScores[key];
-    result[key] = prev * (1 - EMA_ALPHA) + rawScores[key] * EMA_ALPHA;
-  }
-  for (const key of Object.keys(smoothedScores)) {
-    if (result[key] === undefined) {
-      result[key] = smoothedScores[key] * (1 - EMA_ALPHA);
-    }
-  }
-  smoothedScores = result;
-  return result;
-}
+// ── Debug logging flag (enable with ?emotion-debug URL param) ──
+const DEBUG_EMOTION = typeof window !== 'undefined' &&
+  window.location?.search?.includes('emotion-debug');
 
-function calibrateConfidence(dominantScore, expressionStability) {
-  let confidence = dominantScore;
-  if (confidence > 0.8) confidence = Math.min(0.95, confidence);
-  else if (confidence < 0.3) confidence = Math.max(0.1, confidence);
-  confidence = confidence * (0.85 + 0.15 * expressionStability);
-  return Math.max(0.05, Math.min(0.98, confidence));
-}
-
+// ── Expression stability & confidence calibration ──
 function computeExpressionStability(expressions) {
   if (!expressions) return 0.5;
   const vals = Object.values(expressions);
   const maxVal = Math.max(...vals);
-  const secondMax = vals.sort((a, b) => b - a)[1] || 0;
+  const secondMax = [...vals].sort((a, b) => b - a)[1] || 0;
   const gap = maxVal - secondMax;
   return Math.min(1, Math.max(0, gap * 3));
 }
+
+function calibrateConfidence(dominantScore, expressionStability) {
+  let c = dominantScore;
+  if (c > 0.8) c = Math.min(0.95, c);
+  else if (c < 0.15) c = Math.max(0.08, c);
+  c = c * (0.92 + 0.08 * expressionStability);
+  return Math.max(0.05, Math.min(0.98, c));
+}
+
+// ── Frame quality assessment ──
+// Also performs contrast analysis for low-light detection.
+let frameQualityStats = {
+  lastBrightness: -1,
+  lastBlurMetric: -1,
+  consecutiveLowQuality: 0,
+};
 
 function assessFrameQuality(videoElement) {
   try {
@@ -97,6 +264,7 @@ function assessFrameQuality(videoElement) {
     }
     const avgBrightness = totalBrightness / (pixels.length / 4);
 
+    // Blur metric: brightness difference between adjacent pixels
     let brightnessDiff = 0;
     for (let i = 4; i < pixels.length; i += 4) {
       const curr = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
@@ -105,8 +273,8 @@ function assessFrameQuality(videoElement) {
     }
     const blurMetric = 1 - Math.min(1, brightnessDiff / (pixels.length / 4) / 50);
 
-    const isLowLight = avgBrightness < 40;
-    const isBlurry = blurMetric > 0.7;
+    const isLowLight = avgBrightness < LOW_LIGHT_THRESHOLD;
+    const isBlurry = blurMetric > BLUR_THRESHOLD;
 
     frameQualityStats.lastBrightness = avgBrightness;
     frameQualityStats.lastBlurMetric = blurMetric;
@@ -126,113 +294,462 @@ function assessFrameQuality(videoElement) {
       consecutiveLowQuality: frameQualityStats.consecutiveLowQuality,
     };
   } catch {
-    return { avgBrightness: 128, blurMetric: 0.5, isLowLight: false, isBlurry: false, qualityOk: true, consecutiveLowQuality: 0 };
+    return {
+      avgBrightness: 128, blurMetric: 0.5, isLowLight: false, isBlurry: false,
+      qualityOk: true, consecutiveLowQuality: 0,
+    };
   }
 }
 
+// ── Expression to emotion mapping ──
+function mapExpressionToEmotion(expression) {
+  const map = {
+    happy: { label: 'Happy', score: 1 },
+    neutral: { label: 'Neutral', score: 0.8 },
+    sad: { label: 'Sad', score: 0.9 },
+    fearful: { label: 'Nervous', score: 0.9 },
+    angry: { label: 'Angry', score: 0.9 },
+    surprised: { label: 'Confident', score: 0.7 },
+    disgusted: { label: 'Sad', score: 0.6 },
+  };
+  return map[expression] || map[expression.toLowerCase()] || { label: 'Neutral', score: 0.5 };
+}
+
+// ── IoU face matching across frames ──
+function computeIoU(a, b) {
+  const xA = Math.max(a.x, b.x);
+  const yA = Math.max(a.y, b.y);
+  const xB = Math.min(a.x + a.width, b.x + b.width);
+  const yB = Math.min(a.y + a.height, b.y + b.height);
+  const inter = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+  if (inter === 0) return 0;
+  const areaA = a.width * a.height;
+  const areaB = b.width * b.height;
+  return inter / (areaA + areaB - inter);
+}
+
+function matchAndTrackFaces(detections) {
+  const usedIds = new Set();
+  const result = [];
+
+  for (const det of detections) {
+    const bbox = det.detection.box;
+    const bboxCopy = { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
+    let bestId = -1;
+    let bestIoU = IOU_THRESHOLD;
+    for (const [id, track] of faceTracks) {
+      if (usedIds.has(id)) continue;
+      const iou = computeIoU(bbox, track.box);
+      if (iou > bestIoU) {
+        bestIoU = iou;
+        bestId = id;
+      }
+    }
+    if (bestId >= 0) {
+      const track = faceTracks.get(bestId);
+      track.box = bboxCopy;
+      track.expressions = { ...det.expressions };
+      track.age = 0;
+      usedIds.add(bestId);
+      result.push({ id: bestId, box: bbox, expressions: det.expressions, isNew: false });
+    } else {
+      const id = nextFaceId++;
+      faceTracks.set(id, {
+        id, box: bboxCopy, expressions: { ...det.expressions },
+        age: 0, smoothedScores: null,
+      });
+      result.push({ id, box: bbox, expressions: det.expressions, isNew: true });
+    }
+  }
+
+  for (const [id, track] of faceTracks) {
+    if (!usedIds.has(id)) {
+      track.age++;
+      if (track.age > MAX_TRACK_AGE) faceTracks.delete(id);
+    }
+  }
+
+  return result;
+}
+
+// ── Per-face score smoothing (EMA) ──
+function smoothFaceScores(faceId, rawScores) {
+  const track = faceTracks.get(faceId);
+  if (!track) return { ...rawScores };
+  if (!track.smoothedScores) {
+    track.smoothedScores = { ...rawScores };
+    return { ...rawScores };
+  }
+  const result = {};
+  for (const key of Object.keys(rawScores)) {
+    const prev = track.smoothedScores[key] !== undefined ? track.smoothedScores[key] : rawScores[key];
+    result[key] = prev * (1 - EMA_ALPHA) + rawScores[key] * EMA_ALPHA;
+  }
+  for (const key of Object.keys(track.smoothedScores)) {
+    if (result[key] === undefined) {
+      result[key] = track.smoothedScores[key] * (1 - EMA_ALPHA);
+    }
+  }
+  track.smoothedScores = result;
+  return result;
+}
+
+// ── Build per-face object ──
+function buildFaceObject(faceId, box, expressions, quality) {
+  const rawScores = {
+    Happy: (expressions.happy || 0),
+    Neutral: (expressions.neutral || 0),
+    Sad: (expressions.sad || 0) + (expressions.disgusted || 0) * 0.3,
+    Nervous: (expressions.fearful || 0),
+    Angry: (expressions.angry || 0),
+    Confident: (expressions.surprised || 0) * 0.6 + (expressions.happy || 0) * 0.2,
+  };
+  const stability = computeExpressionStability(expressions);
+  const smoothed = smoothFaceScores(faceId, rawScores);
+  const entries = Object.entries(smoothed);
+  entries.sort((a, b) => b[1] - a[1]);
+  const dominant = entries[0][0];
+  const dominantScore = entries[0][1];
+  const calibratedScore = calibrateConfidence(dominantScore, stability);
+
+  return {
+    id: faceId,
+    box: { x: box.x, y: box.y, width: box.width, height: box.height },
+    emotion: dominant,
+    score: Math.round(calibratedScore * (quality.qualityOk ? 1.0 : FRAME_QUALITY_PENALTY) * 100) / 100,
+    raw: dominant,
+    scores: smoothed,
+    expressionStability: Math.round(stability * 100) / 100,
+    faceDetected: true,
+  };
+}
+
+// ── Default neutral result (used across fallback paths) ──
+function defaultNeutral() {
+  return {
+    emotion: 'Neutral', score: 0, raw: 'none', faceDetected: getSmoothedPresence(),
+    scores: { Happy: 0, Neutral: 1, Sad: 0, Nervous: 0, Angry: 0, Confident: 0 },
+  };
+}
+
+// ── Emotion detection with face-api ──
 export async function detectEmotion(videoElement) {
+  // ── Camera verification ──
   if (!videoElement || !videoElement.videoWidth) {
+    recordFrameCapture(false);
+    return defaultNeutral();
+  }
+  recordFrameCapture(true);
+
+  // ── If models not loaded, fall back to backend ViT ──
+  if (!loaded) {
+    // Optimistic: assume face is present during model warmup so the
+    // proctoring system doesn't trigger false warnings
     return {
-      emotion: 'Neutral', score: 0, raw: 'none', faceDetected: false,
+      emotion: 'Neutral', score: 0, raw: 'loading', faceDetected: true,
       scores: { Happy: 0, Neutral: 1, Sad: 0, Nervous: 0, Angry: 0, Confident: 0 },
     };
   }
 
-  if (loaded) {
-    try {
-      const result = await faceapi.detectSingleFace(
-        videoElement,
-        new faceapi.TinyFaceDetectorOptions({ inputSize: 128, scoreThreshold: 0.3 })
-      ).withFaceExpressions();
-
-      if (result && result.expressions) {
-        const expressions = result.expressions;
-        const stability = computeExpressionStability(expressions);
-        const entries = Object.entries(expressions);
-        entries.sort((a, b) => b[1] - a[1]);
-        const dominant = entries[0][0];
-        const dominantScore = entries[0][1];
-
-        const mapped = mapExpressionToEmotion(dominant);
-        const calibratedScore = calibrateConfidence(dominantScore, stability);
-
-        const rawScores = {
-          Happy: expressions.happy || 0,
-          Neutral: expressions.neutral || 0,
-          Sad: expressions.sad || 0,
-          Nervous: expressions.fearful || 0,
-          Angry: expressions.angry || 0,
-          Confident: expressions.happy * 0.5 + expressions.neutral * 0.5,
-        };
-
-        const smoothed = applyTemporalSmoothing(rawScores);
-        const smoothedEntries = Object.entries(smoothed);
-        smoothedEntries.sort((a, b) => b[1] - a[1]);
-        const smoothedDominant = smoothedEntries[0][0];
-        const smoothedMapped = mapExpressionToEmotion(smoothedDominant);
-
-        const frameQuality = assessFrameQuality(videoElement);
-        const qualityPenalty = frameQuality.qualityOk ? 1.0 : 0.85;
-
-        lastRawResult = {
-          emotion: smoothedMapped.label,
-          score: Math.round(calibratedScore * qualityPenalty * 100) / 100,
-          raw: smoothedDominant,
-          faceDetected: true,
-          scores: smoothed,
-          expressionStability: Math.round(stability * 100) / 100,
-          frameQuality,
-        };
-        return lastRawResult;
-      }
-    } catch (err) {
-      console.warn('face-api error, falling back to backend ViT:', err.message);
+  // ── Separate processing lock (does NOT block detectFaces) ──
+  if (emotionLock) {
+    if (Date.now() - emotionLockTime > LOCK_TIMEOUT_MS) {
+      emotionLock = false;
+    } else {
+      // Lock is active but detectEmotion has its own lock, so detectFaces
+      // is not blocked. Return a neutral result with smoothed presence
+      // to prevent stale emotion from propagating.
+      return {
+        emotion: 'Neutral', score: 0, raw: 'locked', faceDetected: getSmoothedPresence(),
+        scores: { Happy: 0, Neutral: 1, Sad: 0, Nervous: 0, Angry: 0, Confident: 0 },
+      };
     }
   }
 
-  return detectEmotionBackend(videoElement);
-}
-
-export async function detectFaces(videoElement) {
-  if (!videoElement || !videoElement.videoWidth || !loaded) {
-    return { faceCount: 0, faceDetected: false, faceBoxes: [], faceChangeWarning: false };
-  }
-
+  emotionLock = true;
+  emotionLockTime = Date.now();
   try {
     const results = await faceapi.detectAllFaces(
       videoElement,
-      new faceapi.TinyFaceDetectorOptions({ inputSize: 128, scoreThreshold: 0.3 })
+      new faceapi.TinyFaceDetectorOptions({ inputSize: INPUT_SIZE_EMOTION, scoreThreshold: FACE_CONFIDENCE_THRESHOLD })
+    ).withFaceExpressions();
+
+    if (results && results.length > 0) {
+      updatePresence(true);
+      noFaceVoteFrames = 0;
+      const frameQuality = assessFrameQuality(videoElement);
+      const matched = matchAndTrackFaces(results);
+
+      const faceObjects = matched.map((m) =>
+        buildFaceObject(m.id, m.box, m.expressions, frameQuality)
+      );
+
+      faceObjects.sort((a, b) => b.score - a.score);
+      const primary = faceObjects[0];
+      const primaryMatched = matched.find((m) => m.id === primary.id);
+      const rawExp = primaryMatched ? primaryMatched.expressions : null;
+
+      // Build raw scores from face-api expressions
+      const rawScores = rawExp ? {
+        Happy: rawExp.happy || 0,
+        Neutral: rawExp.neutral || 0,
+        Sad: (rawExp.sad || 0) + (rawExp.disgusted || 0) * 0.3,
+        Nervous: rawExp.fearful || 0,
+        Angry: rawExp.angry || 0,
+        Confident: (rawExp.surprised || 0) * 0.6 + (rawExp.happy || 0) * 0.2,
+      } : {
+        Happy: primary.scores.Happy,
+        Neutral: primary.scores.Neutral,
+        Sad: primary.scores.Sad,
+        Nervous: primary.scores.Nervous,
+        Angry: primary.scores.Angry,
+        Confident: primary.scores.Confident,
+      };
+
+      // Debug: dump raw face-api values for first 5 frames
+      if (typeof window !== 'undefined' && !window.__emotionDebugDone) {
+        if (!window.__emotionDebugCount) window.__emotionDebugCount = 0;
+        window.__emotionDebugCount++;
+        if (window.__emotionDebugCount <= 5 && rawExp) {
+          console.log('[EmotionDebug] frame', window.__emotionDebugCount,
+            'face-api:', JSON.stringify(Object.fromEntries(
+              Object.entries(rawExp).map(([k, v]) => [k, v.toFixed(4)])
+            )),
+            '→ custom:', JSON.stringify(Object.fromEntries(
+              Object.entries(rawScores).map(([k, v]) => [k, v.toFixed(4)])
+            )));
+        }
+        if (window.__emotionDebugCount > 5) window.__emotionDebugDone = true;
+      }
+
+      // ── EMA score smoothing (primary smoothing layer) ──
+    const smoothed = { ...rawScores };
+
+      // ── Determine displayed emotion from raw scores directly ──
+      // No temporal smoothing — each frame's raw face-api scores are
+      // compared.  The non-neutral emotion with the highest SNR (score /
+      // neutral) above 6 % (and absolute > 0.01) wins.  This gives
+      // instant per-frame response with zero lag.
+      const nonNeutralEmotions = ['Happy', 'Sad', 'Nervous', 'Angry', 'Confident'];
+      const neutralRaw = rawScores.Neutral || 0.001;
+      let bestNonNeutral = null;
+      let bestRatio = 0;
+      for (const em of nonNeutralEmotions) {
+        const score = rawScores[em] || 0;
+        if (score < 0.01) continue;
+        const ratio = score / neutralRaw;
+        if (ratio > bestRatio) {
+          bestRatio = ratio;
+          bestNonNeutral = em;
+        }
+      }
+      const finalEmotion = (bestNonNeutral && bestRatio > 0.06)
+        ? bestNonNeutral
+        : 'Neutral';
+
+      // Update hold state with current values
+      holdEmotion = finalEmotion;
+      holdScores = { ...rawScores };
+      lastFaceTime = Date.now();
+      holdActive = true;
+
+      // Build result using the label and raw scores for bars / charts
+      // Record raw dominant in vote history (for diagnostics only)
+      const rawDominant = (() => {
+        const entries = Object.entries(rawScores);
+        entries.sort((a, b) => b[1] - a[1]);
+        return entries[0][0];
+      })();
+      recordEmotionVote(rawDominant);
+
+      const result = {
+        emotion: finalEmotion,
+        score: primary.score,
+        raw: rawDominant,
+        faceDetected: getSmoothedPresence(),
+        scores: {
+          ...rawScores,
+          _rawHappy: rawExp?.happy || 0,
+          _rawNeutral: rawExp?.neutral || 0,
+          _rawSad: rawExp?.sad || 0,
+          _rawFearful: rawExp?.fearful || 0,
+          _rawAngry: rawExp?.angry || 0,
+          _rawSurprised: rawExp?.surprised || 0,
+          _rawDisgusted: rawExp?.disgusted || 0,
+          _voteDistribution: getVoteDistribution(),
+        },
+        expressionStability: primary.expressionStability,
+        frameQuality,
+        _debug: DEBUG_EMOTION ? {
+          rawScores,
+          rawDominant,
+          bestRatio,
+          bestNonNeutral,
+          neutralRaw,
+          finalEmotion,
+        } : undefined,
+      };
+
+      if (results.length > 1) {
+        result.allFaces = faceObjects;
+      }
+
+      // ── Periodic diagnostics ──
+      logDiagnostics(
+        result.faceDetected, results.length, 0, null,
+        rawDominant, (smoothed[rawDominant] || 0), finalEmotion
+      );
+
+      return result;
+    }
+
+    // No face detected in this frame
+    updatePresence(false);
+    // Hysteresis: only clear vote history after 2 consecutive no-face
+    // frames so a brief interruption (candidate looking down, lighting
+    // flicker) doesn't reset the emotion state
+    noFaceVoteFrames++;
+    if (noFaceVoteFrames >= 2) {
+      emotionVoteHistory = [];
+    }
+
+    // Face-loss hold: if the face disappeared less than HOLD_DURATION_MS
+    // ago, keep returning the last reliable emotion and scores instead of
+    // immediately snapping to Neutral. This prevents the UI from flickering
+    // on brief interruptions (head turn, occlusion, lighting dip).
+    const timeSinceFace = Date.now() - lastFaceTime;
+    if (holdActive && timeSinceFace < HOLD_DURATION_MS) {
+      return {
+        emotion: holdEmotion,
+        score: holdScores[holdEmotion] || 0,
+        raw: 'held',
+        faceDetected: false,
+        scores: { ...holdScores, _voteDistribution: getVoteDistribution() },
+      };
+    }
+
+    // Hold expired or no hold active — return full Neutral
+    holdActive = false;
+    return {
+      emotion: 'Neutral', score: 0, raw: 'none', faceDetected: getSmoothedPresence(),
+      scores: { Happy: 0, Neutral: 1, Sad: 0, Nervous: 0, Angry: 0, Confident: 0 },
+    };
+  } catch (err) {
+    console.warn('face-api error, falling back to backend ViT:', err.message);
+    return detectEmotionBackend(videoElement);
+  } finally {
+    emotionLock = false;
+  }
+}
+
+// ── Face-only detection (for proctoring, multi-face, etc.) ──
+export async function detectFaces(videoElement) {
+  if (!videoElement || !videoElement.videoWidth) {
+    recordFrameCapture(false);
+    return {
+      faceCount: 0, faceDetected: getSmoothedPresence(),
+      faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations: 0,
+    };
+  }
+  recordFrameCapture(true);
+
+  // When models aren't loaded, return optimistic result so proctoring
+  // doesn't fire false warnings during initialization
+  if (!loaded) {
+    return {
+      faceCount: 1, faceDetected: true,
+      faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations: 0,
+    };
+  }
+
+  // Separate lock — does NOT block detectEmotion
+  if (facesLock) {
+    if (Date.now() - facesLockTime > LOCK_TIMEOUT_MS) {
+      facesLock = false;
+    } else {
+      return {
+        faceCount: 0, faceDetected: getSmoothedPresence(),
+        faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations: 0,
+      };
+    }
+  }
+
+  facesLock = true;
+  facesLockTime = Date.now();
+  try {
+    const results = await faceapi.detectAllFaces(
+      videoElement,
+      // Face-only detection uses a slightly smaller input size for speed,
+      // since this runs in the proctoring loop alongside detectEmotion
+      new faceapi.TinyFaceDetectorOptions({
+        inputSize: INPUT_SIZE_FACE,
+        scoreThreshold: FACE_CONFIDENCE_THRESHOLD,
+      })
     );
 
-    const faceCount = results.length;
+    let faceCount = results.length;
+    updateMultiFaceHistory(faceCount);
+    faceCount = isMultiFaceStable() ? faceCount : Math.min(faceCount, 1);
+    updatePresence(faceCount > 0);
+
+    let faceChangeWarning = false;
+    let confirmations = 0;
 
     if (faceCount > 1) {
       const now = Date.now();
-      if (now - lastMultiFaceTime < MULTI_FACE_COOLDOWN_MS) {
-        return {
-          faceCount,
-          faceDetected: faceCount > 0,
-          faceBoxes: results.map((r) => r.box),
-          faceChangeWarning: false,
-        };
+      if (now - lastMultiFaceTime >= MULTI_FACE_COOLDOWN_MS) {
+        lastMultiFaceTime = now;
+        confirmations = multiFaceConfirmations + 1;
+        multiFaceConfirmations = confirmations;
+        faceChangeWarning = true;
+      } else {
+        confirmations = multiFaceConfirmations;
       }
-      lastMultiFaceTime = now;
-      multiFaceConfirmations++;
     } else {
       multiFaceConfirmations = Math.max(0, multiFaceConfirmations - 1);
+      confirmations = multiFaceConfirmations;
     }
 
     return {
       faceCount,
-      faceDetected: faceCount > 0,
-      faceBoxes: results.map((r) => r.box),
-      faceChangeWarning: faceCount > 1,
-      multiFaceConfirmations,
+      faceDetected: getSmoothedPresence(),
+      faceBoxes: results.map((r) => r.detection.box),
+      faceChangeWarning,
+      multiFaceConfirmations: confirmations,
     };
   } catch (err) {
     console.warn('Multi-face detection error:', err.message);
-    return { faceCount: 0, faceDetected: false, faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations };
+    updatePresence(false);
+    return {
+      faceCount: 0, faceDetected: getSmoothedPresence(),
+      faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations,
+    };
+  } finally {
+    facesLock = false;
   }
+}
+
+// ── Exported helpers ──
+export function getAllFaceTracks() {
+  const faces = [];
+  for (const [, track] of faceTracks) {
+    if (track.smoothedScores) {
+      const entries = Object.entries(track.smoothedScores);
+      entries.sort((a, b) => b[1] - a[1]);
+      const dominant = entries[0]?.[0] || 'Neutral';
+      faces.push({
+        id: track.id,
+        box: { ...track.box },
+        emotion: dominant,
+        age: track.age,
+      });
+    }
+  }
+  return faces;
+}
+
+export function getSmoothedFaceState() {
+  return { present: getSmoothedPresence(), history: [...presenceHistory] };
 }
 
 export function getMultiFaceWarningCount() {
@@ -243,10 +760,43 @@ export function getFrameQualityStats() {
   return { ...frameQualityStats };
 }
 
-export function resetDetectionState() {
-  resetSmoothing();
+export function getDiagnostics() {
+  return {
+    fps: getEffectiveFps(),
+    frameReadErrors,
+    consecutiveFrameDrops,
+    presenceHistory: [...presenceHistory],
+    smoothedPresence: getSmoothedPresence(),
+    modelsLoaded: loaded,
+  };
 }
 
+export function resetDetectionState() {
+  emotionLock = false;
+  emotionLockTime = 0;
+  facesLock = false;
+  facesLockTime = 0;
+  faceTracks.clear();
+  nextFaceId = 0;
+  presenceHistory = [];
+  multiFaceHistory = [];
+  emotionVoteHistory = [];
+  noFaceVoteFrames = 0;
+  lastFaceTime = Date.now();
+  holdEmotion = 'Neutral';
+  holdScores = { Happy: 0, Neutral: 1, Sad: 0, Nervous: 0, Angry: 0, Confident: 0 };
+  holdActive = false;
+  lastFrameTimestamps = [];
+  frameReadErrors = 0;
+  consecutiveFrameDrops = 0;
+  frameQualityStats = {
+    lastBrightness: -1, lastBlurMetric: -1, consecutiveLowQuality: 0,
+  };
+  lastMultiFaceTime = 0;
+  multiFaceConfirmations = 0;
+}
+
+// ── Backend ViT fallback ──
 async function detectEmotionBackend(videoElement) {
   try {
     const canvas = document.createElement('canvas');
@@ -265,6 +815,8 @@ async function detectEmotionBackend(videoElement) {
     const data = await res.json();
     const em = data.emotion;
 
+    updatePresence(true);
+
     const rawScores = {
       Happy: em.scores?.Happy || 0,
       Neutral: em.scores?.Neutral || 1,
@@ -280,27 +832,15 @@ async function detectEmotionBackend(videoElement) {
       emotion: em.emotion || 'Neutral',
       score: em.confidence || 0.5,
       raw: em.vitLabel || 'vit',
-      faceDetected: true,
+      faceDetected: getSmoothedPresence(),
       scores: smoothed,
     };
   } catch (err) {
     console.warn('Backend emotion fallback failed:', err.message);
+    updatePresence(false);
     return {
-      emotion: 'Neutral', score: 0, raw: 'error', faceDetected: false,
+      emotion: 'Neutral', score: 0, raw: 'error', faceDetected: getSmoothedPresence(),
       scores: { Happy: 0, Neutral: 1, Sad: 0, Nervous: 0, Angry: 0, Confident: 0 },
     };
   }
-}
-
-function mapExpressionToEmotion(expression) {
-  const map = {
-    happy: { label: 'Happy', score: 1 },
-    neutral: { label: 'Neutral', score: 0.8 },
-    sad: { label: 'Sad', score: 0.9 },
-    fearful: { label: 'Nervous', score: 0.9 },
-    angry: { label: 'Angry', score: 0.9 },
-    surprised: { label: 'Confident', score: 0.7 },
-    disgusted: { label: 'Sad', score: 0.6 },
-  };
-  return map[expression] || { label: 'Neutral', score: 0.5 };
 }

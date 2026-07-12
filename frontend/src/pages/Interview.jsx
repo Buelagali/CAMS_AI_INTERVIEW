@@ -4,7 +4,7 @@ import QuestionCard from '../components/QuestionCard';
 import CameraPreview from '../components/CameraPreview';
 import CircularScore from '../components/CircularScore';
 import { speakText, stopSpeaking } from '../services/speechService';
-import { loadModels, detectEmotion, detectFaces } from '../services/faceDetection';
+import { loadModels, detectEmotion, detectFaces, getAllFaceTracks } from '../services/faceDetection';
 import {
   startCapture,
   stopCapture,
@@ -71,12 +71,13 @@ export default function Interview() {
   const [emotionScoresHistory, setEmotionScoresHistory] = useState([]);
   const [faceDetected, setFaceDetected] = useState(true);
   const [confidenceHistory, setConfidenceHistory] = useState([]);
+  const [allFaces, setAllFaces] = useState([]);
   const [interviewComplete, setInterviewComplete] = useState(false);
   const [cameraActive, setCameraActive] = useState(true);
   const [scoreHistory, setScoreHistory] = useState([]);
   const [multiFaceWarnings, setMultiFaceWarnings] = useState(0);
   const [warningMessage, setWarningMessage] = useState('');
-  const proctoringRef = useRef({ warningLevel: 0, terminated: false });
+  const proctoringRef = useRef({ warningCount: 0, terminated: false });
   const proctoringIntervalRef = useRef(null);
 
   const recognitionRef = useRef(null);
@@ -172,6 +173,11 @@ export default function Interview() {
         setConfidenceHistory((prev) => {
           return [...prev, Math.round(result.score * 100)];
         });
+        if (result.allFaces) {
+          setAllFaces(result.allFaces);
+        } else {
+          setAllFaces([]);
+        }
       }, 1000);
     }
     return () => {
@@ -182,15 +188,70 @@ export default function Interview() {
   useEffect(() => {
     if (!cameraActive || proctoringRef.current.terminated || interviewComplete) return;
 
-    const CONFIRM_FRAMES = 5;
-    let streak = 0;
+    // ── Configurable proctoring thresholds ──
+    const NO_FACE_TIMEOUT_MS = 4000;
+    const MULTI_FACE_TIMEOUT_MS = 2500;
+    const MAX_WARNINGS = 3;
 
-    const messages = {
-      1: 'Multiple faces detected. Please ensure only the candidate is visible.',
-      2: 'Multiple faces detected again. This interview requires only one candidate to remain in front of the camera.',
-      3: 'Third warning: Multiple faces detected repeatedly. The interview will be terminated on the next occurrence.',
-      4: 'Final Warning: Multiple faces persist. The interview is being terminated.',
-    };
+    // ── Time-based tracking ──
+    let noFaceStartTime = null;
+    let noFaceWarningIssuedAt = null;
+    let noFaceWarnCount = 0;
+
+    let multiFaceStreak = 0;
+    let multiFaceStartTime = null;
+    let multiFaceWarningIssuedAt = null;
+    let multiFaceWarnCount = 0;
+    let multiFaceFinalWarnIssuedAt = null;
+
+    function issueNoFaceWarning() {
+      noFaceStartTime = null;
+      noFaceWarningIssuedAt = Date.now();
+      noFaceWarnCount++;
+      proctoringRef.current.warningCount = noFaceWarnCount;
+
+      logProctoringEvent({
+        warningNumber: noFaceWarnCount,
+        faceCount: 0,
+        terminated: false,
+        message: `No-face warning ${noFaceWarnCount}`,
+      });
+
+      setWarningMessage(
+        `Warning: No face detected. Please keep your face in front of the camera.`
+      );
+      setTimeout(() => setWarningMessage(''), 6000);
+    }
+
+    function issueMultiFaceWarning(reason, intervalId, faceCount) {
+      multiFaceStreak = 0;
+      multiFaceStartTime = null;
+      multiFaceWarningIssuedAt = Date.now();
+      multiFaceWarnCount++;
+      setMultiFaceWarnings(multiFaceWarnCount);
+
+      logProctoringEvent({
+        warningNumber: multiFaceWarnCount,
+        faceCount,
+        terminated: false,
+        message: `Warning ${multiFaceWarnCount}/${MAX_WARNINGS}`,
+      });
+
+      if (multiFaceWarnCount >= MAX_WARNINGS) {
+        setWarningMessage(
+          'Final Warning: Multiple faces have been detected repeatedly. The interview will be terminated if this continues.'
+        );
+        setTimeout(() => setWarningMessage(''), 6000);
+        multiFaceFinalWarnIssuedAt = Date.now();
+      } else {
+        const messages = [
+          'Multiple faces detected. Please ensure only the candidate is visible.',
+          'Multiple faces detected again. This interview requires only one candidate to remain in front of the camera.',
+        ];
+        setWarningMessage(messages[multiFaceWarnCount - 1]);
+        setTimeout(() => setWarningMessage(''), 6000);
+      }
+    }
 
     const intervalId = setInterval(async () => {
       if (!videoRef.current || proctoringRef.current.terminated) {
@@ -199,31 +260,80 @@ export default function Interview() {
       }
 
       const result = await detectFaces(videoRef.current);
-      const multiFace = result.faceCount > 1;
 
-      if (multiFace) {
-        streak++;
+      if (!result.faceDetected) {
+        // ── No face handling ──
+        // result.faceDetected already incorporates temporal smoothing
+        // (5/8 frames via getSmoothedPresence), so brief interruptions
+        // are filtered. When the smoothed absence persists past the
+        // timeout, issue warnings. Warnings auto-clear when the face
+        // returns (single-face branch resets all state below).
+        multiFaceStreak = 0;
+        multiFaceStartTime = null;
+        setMultiFaceWarnings(0);
 
-        if (proctoringRef.current.warningLevel >= 4) {
-          if (streak >= CONFIRM_FRAMES && !proctoringRef.current.terminated) {
-            terminateForProctoring();
+        if (noFaceStartTime === null) {
+          noFaceStartTime = Date.now();
+        }
+
+        const elapsed = Date.now() - noFaceStartTime;
+        const timeSinceLastWarning = noFaceWarningIssuedAt
+          ? Date.now() - noFaceWarningIssuedAt
+          : Infinity;
+
+        if (elapsed >= NO_FACE_TIMEOUT_MS && timeSinceLastWarning >= NO_FACE_TIMEOUT_MS) {
+          issueNoFaceWarning();
+        }
+      } else if (result.faceCount > 1) {
+        // ── Multi-face handling ──
+        noFaceStartTime = null;
+        noFaceWarningIssuedAt = null;
+        noFaceWarnCount = 0;
+        multiFaceStreak++;
+
+        if (multiFaceStartTime === null) {
+          multiFaceStartTime = Date.now();
+        }
+
+        const elapsed = Date.now() - multiFaceStartTime;
+        const timeSinceLastWarning = multiFaceWarningIssuedAt
+          ? Date.now() - multiFaceWarningIssuedAt
+          : Infinity;
+
+        if (elapsed >= MULTI_FACE_TIMEOUT_MS && timeSinceLastWarning >= MULTI_FACE_TIMEOUT_MS) {
+          issueMultiFaceWarning(
+            'multiple faces detected after three warnings',
+            intervalId,
+            result.faceCount
+          );
+        }
+
+        // ── Post-final-warning persistence check ──
+        if (multiFaceFinalWarnIssuedAt !== null) {
+          const timeSinceFinalWarn = Date.now() - multiFaceFinalWarnIssuedAt;
+          if (timeSinceFinalWarn >= MULTI_FACE_TIMEOUT_MS) {
+            terminateForProctoring('multiple faces continuously detected after three warnings');
             clearInterval(intervalId);
+            return;
           }
-        } else if (streak >= CONFIRM_FRAMES) {
-          const level = ++proctoringRef.current.warningLevel;
-          setMultiFaceWarnings(level);
-          setWarningMessage(messages[level]);
-          setTimeout(() => setWarningMessage(''), 6000);
-          streak = 0;
         }
       } else {
-        if (proctoringRef.current.warningLevel > 0) {
-          proctoringRef.current.warningLevel = 0;
-          setMultiFaceWarnings(0);
-        }
-        streak = 0;
+        // ── Normal: single face visible ──
+        // Reset ALL tracking immediately when a single face returns.
+        // Each violation period is measured fresh so brief interruptions
+        // cannot accumulate across separate instances.
+        setWarningMessage('');
+        noFaceStartTime = null;
+        noFaceWarningIssuedAt = null;
+        noFaceWarnCount = 0;
+        multiFaceStreak = 0;
+        multiFaceStartTime = null;
+        multiFaceWarnCount = 0;
+        multiFaceWarningIssuedAt = null;
+        multiFaceFinalWarnIssuedAt = null;
+        setMultiFaceWarnings(0);
       }
-    }, 500);
+    }, 1000);
 
     proctoringIntervalRef.current = intervalId;
 
@@ -524,7 +634,13 @@ export default function Interview() {
     }
   };
 
-  const terminateForProctoring = () => {
+  function logProctoringEvent(event) {
+    const events = JSON.parse(sessionStorage.getItem('proctoringEvents') || '[]');
+    events.push({ timestamp: new Date().toISOString(), ...event });
+    sessionStorage.setItem('proctoringEvents', JSON.stringify(events));
+  }
+
+  const terminateForProctoring = (reason) => {
     if (proctoringRef.current.terminated) return;
     proctoringRef.current.terminated = true;
 
@@ -534,19 +650,26 @@ export default function Interview() {
     if (isCurrentlyRecording()) forceStopCapture();
     setQuestionLoading(false);
 
+    const defaultReason = 'Multiple faces were continuously detected during the interview.';
     const log = {
       terminated: true,
-      terminationReason: 'Multiple faces were continuously detected during the interview.',
+      terminationReason: reason || defaultReason,
       terminationType: 'Proctoring Rule Violation',
       timestamp: new Date().toISOString(),
-      warningCount: proctoringRef.current.warningLevel,
+      warningCount: proctoringRef.current.warningCount,
     };
 
     sessionStorage.setItem('proctoringTermination', JSON.stringify(log));
 
-    setTimeout(() => {
-      setInterviewComplete(true);
-    }, 100);
+    logProctoringEvent({
+      terminated: true,
+      terminationReason: reason || defaultReason,
+      warningCount: proctoringRef.current.warningCount,
+    });
+
+    // Trigger handleFinish which computes final scores from collected data
+    // and navigates to /result automatically
+    setInterviewComplete(true);
   };
 
   const submitAnswer = useCallback(async () => {
@@ -597,6 +720,7 @@ export default function Interview() {
             difficulty: currentQuestion.difficulty,
             skill: currentQuestion.metadata?.skill || null,
             emotionData: emotionScores,
+            allFaces: allFaces.length > 0 ? allFaces : undefined,
           }),
         });
         const result = await res.json();
@@ -679,6 +803,15 @@ export default function Interview() {
   const handleFinish = () => {
     const totalQuestions = answers.length;
     const role = candidate.role;
+
+    console.debug('[Pipeline] handleFinish started', {
+      totalQuestions,
+      answersCount: answers.length,
+      emotionHistoryLen: emotionHistory.length,
+      emotionScoresHistoryLen: emotionScoresHistory.length,
+      confidenceHistoryLen: confidenceHistory.length,
+      transcriptionConfidence,
+    });
 
     /* ── Utility Helpers ── */
     function avg(arr) { return arr.length > 0 ? arr.reduce((s, v) => s + v, 0) / arr.length : 0; }
@@ -818,6 +951,12 @@ export default function Interview() {
     const techAnswers = classified.filter(a => a.questionType === 'technical' || a.questionType === 'adaptive');
     const behAnswers = classified.filter(a => a.questionType === 'behavioral');
 
+    console.debug('[Pipeline Stage 7] Aggregate metrics', {
+      classified: classified.length, poorOrEmpty, weakCount, goodCount, nonEng, idkExact,
+      techAnswers: techAnswers.length, behAnswers: behAnswers.length,
+      avgScore: classified.length > 0 ? Math.round(avg(classified.map(a => a.score))) : 'N/A',
+    });
+
     /* ── 8. Communication Score (pure avg of per-answer evidence, no group penalties) ── */
     const commPerAnswer = classified.map(a => {
       let base = a.cls.score;
@@ -828,7 +967,8 @@ export default function Interview() {
       else if (/^(i don'?t know|naaku teliyadhu|not sure|i have no idea|i can'?t answer)$/.test(t)) base = Math.min(base, 15);
       return clamp(base, 0, 100);
     });
-    const communication = commPerAnswer.length > 0 ? Math.round(avg(commPerAnswer)) : 0;
+    const communication = commPerAnswer.length > 0 ? Math.round(avg(commPerAnswer)) : (totalQuestions > 0 ? 15 : 0);
+    console.debug('[Pipeline Stage 8] Communication score', { communication, commPerAnswerLen: commPerAnswer.length });
 
     /* ── 9. Technical Score ── */
     let technical = 0;
@@ -845,7 +985,10 @@ export default function Interview() {
       t -= techWeak * 6;
       t -= techIdk * 8;
       technical = clamp(t, 0, 100);
+    } else if (totalQuestions > 0) {
+      technical = Math.round(avg(classified.map(a => a.score)) * 0.6);
     }
+    console.debug('[Pipeline Stage 9] Technical score', { technical, techAnswersLen: techAnswers.length });
 
     /* ── 10. Confidence Score ── */
     const confVals = classified.map(a => a.confidence).filter(c => c != null);
@@ -854,6 +997,7 @@ export default function Interview() {
     const fillerPenalty = Math.min(20, classified.filter(a => fillerWords.some(fw => (a.answer || '').toLowerCase().includes(fw))).length * 3);
     const sttPenalty = (typeof transcriptionConfidence !== 'undefined' && transcriptionConfidence > 0 && transcriptionConfidence < 50) ? 10 : 0;
     const confidence = clamp(rawConf * 0.4 + confStab * 0.2 - fillerPenalty - sttPenalty, 0, 100);
+    console.debug('[Pipeline Stage 10] Confidence score', { confidence, rawConf, confStab, fillerPenalty, sttPenalty, confValsLen: confVals.length });
 
     /* ── 11. Behavioral Score ── */
     const rawBeh = behAnswers.length > 0 ? avg(behAnswers.map(a => a.score)) : 0;
@@ -864,7 +1008,10 @@ export default function Interview() {
     const ldCount = classified.filter(a => leaderWords.some(w => (a.answer || '').toLowerCase().includes(w))).length;
     const behavior = behAnswers.length > 0
       ? clamp(rawBeh * 0.5 + behCoverage * 20 + Math.min(8, twCount * 1.5 + ldCount * 1.5), 0, 100)
-      : clamp(behCoverage * 15, 0, 50);
+      : totalQuestions > 0
+        ? clamp(25 + Math.min(8, twCount * 1.5 + ldCount * 1.5) + Math.min(behCoverage * 15, 20), 0, 50)
+        : 0;
+    console.debug('[Pipeline Stage 11] Behavior score', { behavior, rawBeh, behCoverage, twCount, ldCount, behAnswersLen: behAnswers.length });
 
     /* ── 12. Emotional Analysis (full-timeline, evidence-backed) ── */
     const emotionAnalysis = analyzeEmotionStability({
@@ -873,7 +1020,7 @@ export default function Interview() {
       confidenceHistory,
       answers: classified,
     });
-    const emotion = emotionAnalysis.score;
+    const emotion = emotionAnalysis.score || (totalQuestions > 0 ? 35 : 0);
     const dominantEmotion = (() => {
       const counts = {};
       emotionHistory.forEach(e => { counts[e] = (counts[e] || 0) + 1; });
@@ -885,6 +1032,7 @@ export default function Interview() {
     const engagement = emotionHistory.length > 0
       ? Math.round(emotionHistory.filter(e => ['Happy', 'Confident', 'Neutral'].includes(e)).length / emotionHistory.length * 70 + 15)
       : 0;
+    console.debug('[Pipeline Stage 12] Emotional analysis', { emotionScore: emotion, dominantEmotion, stressLvl, engagement, emotionHistoryLen: emotionHistory.length });
 
     /* ── 13. Resume Matching ── */
     const roleSkillsList = getSkillGraph(role) || [];
@@ -896,6 +1044,7 @@ export default function Interview() {
     classified.forEach(a => { roleSkillsList.forEach(s => { if ((a.answer || '').toLowerCase().includes(s.toLowerCase())) discussedSkills.add(s); }); });
     const discussedRatio = matchedSkills.length > 0 ? [...matchedSkills].filter(s => discussedSkills.has(s)).length / matchedSkills.length : 0;
     const resumeMatchScore = Math.round((resumeMatch.matchScore || roleMatchScore) * 0.35 + roleMatchScore * 0.35 + discussedRatio * 30);
+    console.debug('[Pipeline Stage 13] Resume matching', { resumeMatchScore, roleMatchScore, matchedSkills: matchedSkills.length, missingSkills: missingSkills.length, discussedRatio });
 
     /* ── 14. Evidence Strings ── */
     const avgWc = avg(classified.map(a => a.wc));
@@ -973,6 +1122,7 @@ export default function Interview() {
     if (confVals.length < 2) overall *= 0.85;
 
     overall = clamp(overall, 0, 100);
+    console.debug('[Pipeline Stage 15] Overall score', { overall, w, components: { technical, communication, confidence, behavior, resumeMatchScore, emotion } });
 
     const overallReasons = [];
     if (poorOrEmpty > 0) overallReasons.push(poorOrEmpty + ' of ' + totalQuestions + ' answers were poor quality.');
@@ -1225,6 +1375,10 @@ export default function Interview() {
       generatedAt: new Date().toISOString(),
     };
 
+    console.debug('[Pipeline Final] finalScores saved', finalScores);
+    console.debug('[Pipeline Final] feedback saved', { hasEvidence: !!feedback.evidence, hasStrengths: !!feedback.strengths, recommendation: feedback.recommendation });
+    console.debug('[Pipeline Final] answerQuality entries', classified.length);
+
     sessionStorage.setItem('finalScores', JSON.stringify(finalScores));
     sessionStorage.setItem('feedback', JSON.stringify(feedback));
     sessionStorage.setItem('answerQuality', JSON.stringify(classified.map(a => ({ question: a.question, answer: a.answer, grade: a.cls.grade, score: a.cls.score, language: a.lang }))));
@@ -1272,6 +1426,7 @@ export default function Interview() {
           emotionScoresHistory={emotionScoresHistory}
           faceDetected={faceDetected}
           multiFaceWarnings={multiFaceWarnings}
+          allFaces={allFaces}
         />
         <div>
           {currentQuestion && !interviewComplete ? (

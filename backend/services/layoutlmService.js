@@ -14,19 +14,35 @@ async function getDocumentPipeline() {
   return documentPipeline;
 }
 
-exports.extractResumeFields = async (text) => {
+exports.extractResumeFields = async (text, options = {}) => {
   if (!text || text.length < 20) {
     return { skills: [], education: [], experience: 0, projects: [], certifications: [], name: '', email: '' };
   }
 
   const lines = text.split('\n').filter((l) => l.trim());
 
-  const name = extractName(text);
+  let layoutResults = null;
+  if (options.buffer) {
+    try {
+      layoutResults = await analyzeWithLayoutLM(options.buffer);
+    } catch (err) {
+      console.warn('LayoutLM QA extraction failed, using regex fallback:', err.message);
+    }
+  }
+
+  const name = layoutResults?.['What is the candidate name?'] || extractName(text);
   const email = extractEmail(text);
   const phone = extractPhone(text);
-  const skills = extractSkills(text);
+  const skillsFromLayout = layoutResults?.['What skills does this person have?'];
+  const skills = skillsFromLayout
+    ? parseLayoutLmList(skillsFromLayout).length > 0
+      ? parseLayoutLmList(skillsFromLayout)
+      : extractSkills(text)
+    : extractSkills(text);
   const education = extractEducation(text, lines);
-  const experience = extractExperience(text);
+  const experience = layoutResults?.['How many years of experience?']
+    ? parseYears(layoutResults['How many years of experience?'])
+    : extractExperience(text);
   const projects = extractProjects(text, lines);
   const certifications = extractCertifications(text, lines);
 
@@ -42,6 +58,17 @@ exports.extractResumeFields = async (text) => {
     certifications,
   };
 };
+
+function parseLayoutLmList(str) {
+  if (!str || typeof str !== 'string') return [];
+  return str.split(/[,;/\n]/).map((s) => s.trim()).filter(Boolean);
+}
+
+function parseYears(str) {
+  if (!str) return 0;
+  const match = str.match(/(\d+)/);
+  return match ? parseInt(match[1]) : 0;
+}
 
 async function analyzeWithLayoutLM(imageBuffer) {
   try {
