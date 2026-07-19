@@ -122,11 +122,22 @@ jobs:
         run: |
           cd backend && npm ci
           cd ../frontend && npm ci
-      - name: Start services
+      - name: Start Backend
         run: |
-          docker compose -f docker-compose.yml up -d redis
-          cd backend && node server.js &
-          sleep 10
+          cd backend
+          npm ci
+          node server.js &
+          sleep 15
+
+      - name: Start Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run dev -- --host 0.0.0.0 &
+          sleep 20
+      - name: Wait for Frontend
+        run: |
+        curl --retry 20 --retry-delay 3 http://localhost:3000
       - name: Install Playwright
         working-directory: ./e2e
         run: |
