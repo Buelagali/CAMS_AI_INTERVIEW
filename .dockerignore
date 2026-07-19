@@ -6,6 +6,5 @@ backend/datasets/
 backend/training/
 backend/node_modules/
 frontend/node_modules/
-frontend/src/
 **/.gitkeep
 *.log
