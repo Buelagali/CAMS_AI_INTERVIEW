@@ -73,8 +73,6 @@ jobs:
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      - name: Dependency review
-        uses: actions/dependency-review-action@v4
 
   dependency-scan:
     name: Dependency Scan
