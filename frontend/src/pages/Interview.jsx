@@ -5,6 +5,7 @@ import CameraPreview from '../components/CameraPreview';
 import CircularScore from '../components/CircularScore';
 import { speakText, stopSpeaking } from '../services/speechService';
 import { loadModels, detectEmotion, detectFaces, getAllFaceTracks } from '../services/faceDetection';
+import * as faceapi from '@vladmandic/face-api';
 import {
   startCapture,
   stopCapture,
@@ -188,21 +189,44 @@ export default function Interview() {
   useEffect(() => {
     if (!cameraActive || proctoringRef.current.terminated || interviewComplete) return;
 
-    // ── Configurable proctoring thresholds ──
-    const NO_FACE_TIMEOUT_MS = 4000;
-    const MULTI_FACE_TIMEOUT_MS = 2500;
-    const MAX_WARNINGS = 3;
+    console.log('[Proctor] Camera started. Waiting for detector stabilization...');
 
-    // ── Time-based tracking ──
+    const NO_FACE_TIMEOUT_MS = 4000;
+    const CONFIRM_FRAMES = 1;
+    const STABILIZE_FRAMES = 2;
+    const MAX_STABILIZATION_ATTEMPTS = 5;
+
+    let stabilized = false;
+    let stableFrames = 0;
+    let stabilizationAttempts = 0;
+    let frameIndex = 0;
+
     let noFaceStartTime = null;
     let noFaceWarningIssuedAt = null;
     let noFaceWarnCount = 0;
 
-    let multiFaceStreak = 0;
-    let multiFaceStartTime = null;
-    let multiFaceWarningIssuedAt = null;
-    let multiFaceWarnCount = 0;
-    let multiFaceFinalWarnIssuedAt = null;
+    let multiFaceTimerStart = null;
+    let multiFaceConsecutive = 0;
+    let singleFaceConsecutive = 0;
+    let warningLevel = 0;
+    let terminationTriggered = false;
+
+    function showMultiFaceWarning(text) {
+      console.warn(
+        `%c⚠ ${text}`,
+        'background:#ff4757;color:white;font-size:18px;font-weight:bold;padding:8px 16px;border-radius:4px'
+      );
+      setWarningMessage(text);
+      setTimeout(() => setWarningMessage(''), 8000);
+    }
+
+    function clearAllMultiFaceWarnings() {
+      warningLevel = 0;
+      multiFaceConsecutive = 0;
+      singleFaceConsecutive = 0;
+      setWarningMessage('');
+      setMultiFaceWarnings(0);
+    }
 
     function issueNoFaceWarning() {
       noFaceStartTime = null;
@@ -216,128 +240,203 @@ export default function Interview() {
         terminated: false,
         message: `No-face warning ${noFaceWarnCount}`,
       });
-
-      setWarningMessage(
-        `Warning: No face detected. Please keep your face in front of the camera.`
-      );
-      setTimeout(() => setWarningMessage(''), 6000);
     }
 
-    function issueMultiFaceWarning(reason, intervalId, faceCount) {
-      multiFaceStreak = 0;
-      multiFaceStartTime = null;
-      multiFaceWarningIssuedAt = Date.now();
-      multiFaceWarnCount++;
-      setMultiFaceWarnings(multiFaceWarnCount);
-
-      logProctoringEvent({
-        warningNumber: multiFaceWarnCount,
-        faceCount,
-        terminated: false,
-        message: `Warning ${multiFaceWarnCount}/${MAX_WARNINGS}`,
-      });
-
-      if (multiFaceWarnCount >= MAX_WARNINGS) {
-        setWarningMessage(
-          'Final Warning: Multiple faces have been detected repeatedly. The interview will be terminated if this continues.'
-        );
-        setTimeout(() => setWarningMessage(''), 6000);
-        multiFaceFinalWarnIssuedAt = Date.now();
-      } else {
-        const messages = [
-          'Multiple faces detected. Please ensure only the candidate is visible.',
-          'Multiple faces detected again. This interview requires only one candidate to remain in front of the camera.',
-        ];
-        setWarningMessage(messages[multiFaceWarnCount - 1]);
-        setTimeout(() => setWarningMessage(''), 6000);
-      }
-    }
-
-    const intervalId = setInterval(async () => {
+    async function proctoringTick() {
       if (!videoRef.current || proctoringRef.current.terminated) {
-        clearInterval(intervalId);
         return;
       }
 
+      console.log('[Proctor] Face Detector Running');
       const result = await detectFaces(videoRef.current);
 
-      if (!result.faceDetected) {
-        // ── No face handling ──
-        // result.faceDetected already incorporates temporal smoothing
-        // (5/8 frames via getSmoothedPresence), so brief interruptions
-        // are filtered. When the smoothed absence persists past the
-        // timeout, issue warnings. Warnings auto-clear when the face
-        // returns (single-face branch resets all state below).
-        multiFaceStreak = 0;
-        multiFaceStartTime = null;
-        setMultiFaceWarnings(0);
+      let fc = result.faceCount;
+      const fd = result.faceDetected;
 
-        if (noFaceStartTime === null) {
-          noFaceStartTime = Date.now();
-        }
-
-        const elapsed = Date.now() - noFaceStartTime;
-        const timeSinceLastWarning = noFaceWarningIssuedAt
-          ? Date.now() - noFaceWarningIssuedAt
-          : Infinity;
-
-        if (elapsed >= NO_FACE_TIMEOUT_MS && timeSinceLastWarning >= NO_FACE_TIMEOUT_MS) {
-          issueNoFaceWarning();
-        }
-      } else if (result.faceCount > 1) {
-        // ── Multi-face handling ──
-        noFaceStartTime = null;
-        noFaceWarningIssuedAt = null;
-        noFaceWarnCount = 0;
-        multiFaceStreak++;
-
-        if (multiFaceStartTime === null) {
-          multiFaceStartTime = Date.now();
-        }
-
-        const elapsed = Date.now() - multiFaceStartTime;
-        const timeSinceLastWarning = multiFaceWarningIssuedAt
-          ? Date.now() - multiFaceWarningIssuedAt
-          : Infinity;
-
-        if (elapsed >= MULTI_FACE_TIMEOUT_MS && timeSinceLastWarning >= MULTI_FACE_TIMEOUT_MS) {
-          issueMultiFaceWarning(
-            'multiple faces detected after three warnings',
-            intervalId,
-            result.faceCount
+      // Direct raw detection with very low threshold (bypass NMS/noise floor)
+      // to catch any plausible face for proctoring only.
+      try {
+        const rawDets = await faceapi.detectAllFaces(
+          videoRef.current,
+          new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.1 })
+        );
+        const rawCount = rawDets.length;
+        if (rawCount > fc) {
+          console.warn(
+            `%c[Proctor] RAW direct found ${rawCount} faces (detectFaces=${fc}) — using raw count`,
+            'background:#ff4757;color:white;font-weight:bold;padding:2px 6px'
           );
+          fc = rawCount;
+        }
+      } catch (e) {
+        // direct detection is a fallback; ignore errors
+      }
+
+      frameIndex++;
+      console.log(`[Proctor] Frame ${frameIndex}: faceCount=${fc} faceDetected=${fd} multiConsec=${multiFaceConsecutive} singleConsec=${singleFaceConsecutive} warningLevel=${warningLevel}`);
+
+      if (fc > 1) {
+        console.log('[Proctor] Multiple Face Condition = TRUE');
+      }
+
+      // ── Stabilization phase: ignore all proctoring decisions ──
+      if (!stabilized) {
+        stabilizationAttempts++;
+        console.log(`[Proctor]   (stabilization ${stabilizationAttempts}/${MAX_STABILIZATION_ATTEMPTS})`);
+
+        if (fd && fc === 1) {
+          stableFrames++;
+          if (stableFrames >= STABILIZE_FRAMES) {
+            stabilized = true;
+            console.log('[Proctor] Detector stabilized. Proctoring enabled.');
+          }
+        } else {
+          stableFrames = 0;
         }
 
-        // ── Post-final-warning persistence check ──
-        if (multiFaceFinalWarnIssuedAt !== null) {
-          const timeSinceFinalWarn = Date.now() - multiFaceFinalWarnIssuedAt;
-          if (timeSinceFinalWarn >= MULTI_FACE_TIMEOUT_MS) {
-            terminateForProctoring('multiple faces continuously detected after three warnings');
-            clearInterval(intervalId);
-            return;
-          }
+        if (stabilizationAttempts >= MAX_STABILIZATION_ATTEMPTS) {
+          stabilized = true;
+          console.log('[Proctor] Max stabilization attempts reached. Enabling proctoring.');
         }
-      } else {
-        // ── Normal: single face visible ──
-        // Reset ALL tracking immediately when a single face returns.
-        // Each violation period is measured fresh so brief interruptions
-        // cannot accumulate across separate instances.
-        setWarningMessage('');
+        return;
+      }
+
+      // ── Route by faceCount ──
+      if (fc === 0) {
+        console.log('[Proctor]   → NO FACE path');
+        multiFaceTimerStart = null;
+        multiFaceConsecutive = 0;
+        singleFaceConsecutive = 0;
+
+        if (!fd) {
+          if (noFaceStartTime === null) {
+            noFaceStartTime = Date.now();
+            console.log('[Proctor]   No-face timer started');
+          }
+          const elapsed = Date.now() - noFaceStartTime;
+          const timeSinceLastWarning = noFaceWarningIssuedAt
+            ? Date.now() - noFaceWarningIssuedAt
+            : Infinity;
+
+          if (elapsed >= NO_FACE_TIMEOUT_MS && timeSinceLastWarning >= NO_FACE_TIMEOUT_MS) {
+            console.log(`[Proctor]   → Issuing no-face warning #${noFaceWarnCount + 1}`);
+            issueNoFaceWarning();
+          }
+        } else {
+          noFaceStartTime = null;
+        }
+        return;
+      }
+
+      if (fc === 1) {
+        console.log('[Proctor]   → SINGLE FACE path');
+        if (multiFaceTimerStart !== null) {
+          console.log('[Proctor]   Multiple Face Timer Reset');
+        }
+        multiFaceTimerStart = null;
         noFaceStartTime = null;
         noFaceWarningIssuedAt = null;
         noFaceWarnCount = 0;
-        multiFaceStreak = 0;
-        multiFaceStartTime = null;
-        multiFaceWarnCount = 0;
-        multiFaceWarningIssuedAt = null;
-        multiFaceFinalWarnIssuedAt = null;
-        setMultiFaceWarnings(0);
+        multiFaceConsecutive = 0;
+        singleFaceConsecutive++;
+
+        if (singleFaceConsecutive >= CONFIRM_FRAMES && warningLevel > 0) {
+          console.log('[Proctor]   Single face confirmed. Resetting multi-face warnings.');
+          clearAllMultiFaceWarnings();
+        }
+        return;
       }
-    }, 1000);
 
-    proctoringIntervalRef.current = intervalId;
+      // ═══ Multi-face (fc > 1) ═══
+      console.log(`[Proctor]   → MULTI FACE path (${fc} faces detected!)`);
 
-    return () => clearInterval(intervalId);
+      noFaceStartTime = null;
+      noFaceWarningIssuedAt = null;
+      noFaceWarnCount = 0;
+      singleFaceConsecutive = 0;
+
+      if (multiFaceTimerStart === null) {
+        multiFaceTimerStart = Date.now();
+        console.log('[Proctor]   Multiple Face Timer Started');
+      }
+
+      multiFaceConsecutive++;
+      const elapsedSec = (Date.now() - multiFaceTimerStart) / 1000;
+      console.log(`[Proctor]   Elapsed: ${elapsedSec.toFixed(1)} sec`);
+      console.log(`[Proctor]   Multi-face consecutive=${multiFaceConsecutive}/${CONFIRM_FRAMES}`);
+
+      if (multiFaceConsecutive < CONFIRM_FRAMES) return;
+
+      console.log(`[Proctor]   *** Multi-face CONFIRMED (${multiFaceConsecutive} consecutive). warningLevel=${warningLevel} ***`);
+
+      if (warningLevel === 3) {
+        if (terminationTriggered) return;
+        terminationTriggered = true;
+        console.log('[Proctor]   *** TERMINATING for repeated multi-face violation. ***');
+        logProctoringEvent({
+          warningNumber: 3,
+          faceCount: fc,
+          terminated: true,
+          message: 'Multiple faces were detected repeatedly during the interview.',
+        });
+        terminateForProctoring('Multiple faces were detected repeatedly during the interview.');
+        return;
+      }
+
+      if (warningLevel === 0) {
+        console.log('[Proctor]   *** Warning 1 TRIGGERED ***');
+        warningLevel = 1;
+        setMultiFaceWarnings(1);
+        proctoringRef.current.warningCount = 1;
+        showMultiFaceWarning(
+          'Warning 1: Multiple faces detected. Only one candidate is allowed during the interview.'
+        );
+        logProctoringEvent({ warningNumber: 1, faceCount: fc, terminated: false, warningLevel: 1 });
+        return;
+      }
+
+      if (warningLevel === 1) {
+        console.log('[Proctor]   *** Warning 2 TRIGGERED ***');
+        warningLevel = 2;
+        setMultiFaceWarnings(2);
+        proctoringRef.current.warningCount = 2;
+        showMultiFaceWarning(
+          'Warning 2: Multiple faces detected again. Please ensure only one candidate remains in front of the camera.'
+        );
+        logProctoringEvent({ warningNumber: 2, faceCount: fc, terminated: false, warningLevel: 2 });
+        return;
+      }
+
+      if (warningLevel === 2) {
+        console.log('[Proctor]   *** Final Warning TRIGGERED ***');
+        warningLevel = 3;
+        setMultiFaceWarnings(3);
+        proctoringRef.current.warningCount = 3;
+        showMultiFaceWarning(
+          'Final Warning: Multiple faces have been detected repeatedly. The interview will now be terminated if another violation occurs.'
+        );
+        logProctoringEvent({ warningNumber: 3, faceCount: fc, terminated: false, warningLevel: 3 });
+        return;
+      }
+    }
+
+    // Offset the proctoring interval by 500ms so it never fires at the same
+    // time as the emotion interval (which uses setInterval(..., 1000) and
+    // shares the same face-api WebGL backend). If both call
+    // faceapi.detectAllFaces concurrently, the racing call can return empty
+    // detections, making faceCount=0 and the multi-face path unreachable.
+    const delayTimer = setTimeout(() => {
+      const id = setInterval(proctoringTick, 1000);
+      proctoringIntervalRef.current = id;
+    }, 500);
+
+    return () => {
+      clearTimeout(delayTimer);
+      if (proctoringIntervalRef.current) {
+        clearInterval(proctoringIntervalRef.current);
+        proctoringIntervalRef.current = null;
+      }
+    };
   }, [cameraActive, interviewComplete]);
 
   useEffect(() => {
@@ -536,6 +635,9 @@ export default function Interview() {
       } else if (status.type === 'streaming') {
         setSttStatus(`Backend streaming (${status.confidence}% confidence)`);
         setTranscriptionConfidence(status.confidence);
+      } else if (status.type === 'warning') {
+        setSttStatus(status.message || 'Using backend Whisper for transcription');
+        startStreamingTranscription(null, sessionId, { fastPoll: true });
       } else if (status.type === 'fallback') {
         setSttStatus('Using browser speech recognition (backend unavailable)');
       } else if (status.type === 'error') {
@@ -650,7 +752,7 @@ export default function Interview() {
     if (isCurrentlyRecording()) forceStopCapture();
     setQuestionLoading(false);
 
-    const defaultReason = 'Multiple faces were continuously detected during the interview.';
+    const defaultReason = 'Multiple faces were detected repeatedly during the interview.';
     const log = {
       terminated: true,
       terminationReason: reason || defaultReason,

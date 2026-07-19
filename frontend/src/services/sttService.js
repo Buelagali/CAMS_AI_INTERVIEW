@@ -72,14 +72,13 @@ export function initWebSpeech(preferredLang = 'en-IN') {
 
     if (event.error === 'network') {
       reconnectAttempts++;
-      if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
-        if (recognitionRestartTimeout) clearTimeout(recognitionRestartTimeout);
-        recognitionRestartTimeout = setTimeout(() => {
-          if (isWebSpeechListening) startWebSpeech();
-        }, 1000 * reconnectAttempts);
-      } else {
-        setWebSpeechListening(false);
-        if (onStatusCallback) onStatusCallback({ type: 'error', error: 'Recognition failed after retries' });
+      if (recognitionRestartTimeout) clearTimeout(recognitionRestartTimeout);
+      const delay = Math.min(3000, 500 * reconnectAttempts);
+      recognitionRestartTimeout = setTimeout(() => {
+        if (isWebSpeechListening) startWebSpeech();
+      }, delay);
+      if (reconnectAttempts > 3 && onStatusCallback) {
+        onStatusCallback({ type: 'warning', source: 'backend', message: 'Using backend Whisper (browser speech unavailable)' });
       }
       return;
     }
@@ -266,12 +265,12 @@ export function getChunkSendStats() {
   };
 }
 
-export function startStreamingTranscription(onChunkResult, sessionId) {
+export function startStreamingTranscription(onChunkResult, sessionId, options = {}) {
   stopStreamingTranscription();
   streamingAccumulatedText = '';
   activeSessionId = sessionId || activeSessionId;
 
-  const intervalMs = 4000;
+  const intervalMs = options.fastPoll ? 2000 : 4000;
 
   streamingInterval = setInterval(async () => {
     if (!activeSessionId) return;

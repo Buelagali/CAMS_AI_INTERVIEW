@@ -7,15 +7,14 @@ import {
   INPUT_SIZE_EMOTION,
   PRESENCE_HISTORY_LEN,
   PRESENCE_MAJORITY_RATIO,
-  MULTI_FACE_HISTORY_LEN,
-  MULTI_FACE_MAJORITY,
-  MULTI_FACE_COOLDOWN_MS,
   EMA_ALPHA,
   LOW_LIGHT_THRESHOLD,
   BLUR_THRESHOLD,
   FRAME_QUALITY_PENALTY,
   LOCK_TIMEOUT_MS,
   IOU_THRESHOLD,
+  NMS_IOU_THRESHOLD,
+  RAW_CONFIDENCE_FLOOR,
   MAX_TRACK_AGE,
   NO_FACE_TIMEOUT_MS,
   MISSED_FRAME_LIMIT,
@@ -37,11 +36,20 @@ let emotionLockTime = 0;
 let facesLock = false;
 let facesLockTime = 0;
 
-// ── Temporal presence buffer ──
-// Uses PRESENCE_HISTORY_LEN (8) frames. A face is considered present
-// only when PRESENCE_MAJORITY_RATIO (62.5%) of recent frames detected
-// it. This prevents brief detection flickers from triggering warnings.
+// ── Temporal presence buffers ──
+// There are TWO independent buffers:
+//   1. presenceHistory       — used by detectEmotion (emotion analysis)
+//   2. facePresenceOnly      — used ONLY by detectFaces (proctoring)
+//
+// The emotion and face-detection intervals run concurrently. When
+// detectEmotion fails to find a face (e.g. expression extraction drops the
+// frame), it calls updatePresence(false). If this happened to share a buffer
+// with detectFaces, the false entry would make getSmoothedPresence() return
+// "No Face" even though detectFaces correctly sees the face.
+//
+// Separate buffers eliminate this cross-contamination.
 let presenceHistory = [];
+let facePresenceOnly = [];
 
 function updatePresence(rawDetected) {
   presenceHistory.push(rawDetected);
@@ -57,23 +65,21 @@ function getSmoothedPresence() {
   return count >= needed;
 }
 
-// ── Multi-face temporal buffer ──
-let multiFaceHistory = [];
-let lastMultiFaceTime = 0;
-let multiFaceConfirmations = 0;
-
-function updateMultiFaceHistory(rawCount) {
-  multiFaceHistory.push(rawCount);
-  if (multiFaceHistory.length > MULTI_FACE_HISTORY_LEN) {
-    multiFaceHistory.shift();
+function updateFacePresence(rawDetected) {
+  facePresenceOnly.push(rawDetected);
+  if (facePresenceOnly.length > PRESENCE_HISTORY_LEN) {
+    facePresenceOnly.shift();
   }
 }
 
-function isMultiFaceStable() {
-  if (multiFaceHistory.length < 2) return false;
-  const multiCount = multiFaceHistory.filter(c => c > 1).length;
-  return multiCount >= MULTI_FACE_MAJORITY;
+function getFacePresence() {
+  if (facePresenceOnly.length === 0) return false;
+  const count = facePresenceOnly.filter(Boolean).length;
+  const needed = Math.ceil(PRESENCE_HISTORY_LEN * PRESENCE_MAJORITY_RATIO);
+  return count >= needed;
 }
+
+// ── Multi-face temporal buffer (deprecated — stability moved to Interview.jsx proctoring loop) ──
 
 // ── Emotion majority-vote history ──
 // Records the raw dominant emotion label from each frame so the
@@ -185,24 +191,29 @@ function logDiagnostics(faceDetected, faceCount, warningCount, terminationReason
 export async function loadModels() {
   if (loaded || loadingAttempted) return;
   loadingAttempted = true;
+
+  console.log(`[FaceDetect] Detector: face-api.js (${faceapi?.version?.faceapi || faceapi?.version || '?'})`);
+  console.log('[FaceDetect] Model: TinyFaceDetector');
+  console.log(`[FaceDetect] Config: inputSize(Face)=${INPUT_SIZE_FACE}, inputSize(Emotion)=${INPUT_SIZE_EMOTION}, scoreThreshold=${FACE_CONFIDENCE_THRESHOLD}, presenceHistoryLen=${PRESENCE_HISTORY_LEN}, presenceMajority=${PRESENCE_MAJORITY_RATIO}`);
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await faceapi.nets.tinyFaceDetector.load(MODEL_URL);
       await faceapi.nets.faceExpressionNet.load(MODEL_URL);
       loaded = true;
       resetDetectionState();
-      // Optimistic presence: fill buffer so first frames don't trigger
-      // false "No Face" during initial warmup
       for (let i = 0; i < PRESENCE_HISTORY_LEN; i++) {
         presenceHistory.push(true);
+        facePresenceOnly.push(true);
       }
+      console.log('[FaceDetect] TinyFaceDetector loaded successfully');
       return;
     } catch (err) {
-      console.warn(`Face-api model load attempt ${attempt}/3 failed:`, err.message);
+      console.warn(`[FaceDetect] Model load attempt ${attempt}/3 failed:`, err.message);
       if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt));
     }
   }
-  console.error('Face-api models failed to load after 3 attempts');
+  console.error('[FaceDetect] Face-api models failed to load after 3 attempts');
 }
 
 // ── State management ──
@@ -327,6 +338,35 @@ function computeIoU(a, b) {
   const areaB = b.width * b.height;
   return inter / (areaA + areaB - inter);
 }
+
+// ── Non-maximum suppression for single-frame deduplication ──
+// The raw detector can return multiple overlapping boxes for the same face
+// (typically 2-3 boxes with slightly different positions and confidences).
+// NMS keeps only the highest-confidence box per face by discarding any
+// detection whose IoU with a higher-confidence detection exceeds the threshold.
+function nonMaxSuppression(detections, iouThreshold = NMS_IOU_THRESHOLD, minConfidence = RAW_CONFIDENCE_FLOOR) {
+  const filtered = detections.filter(d => d.detection.score >= minConfidence);
+
+  filtered.sort((a, b) => b.detection.score - a.detection.score);
+
+  const keep = [];
+  while (filtered.length > 0) {
+    const best = filtered.shift();
+    keep.push(best);
+
+    let writeIdx = 0;
+    for (let i = 0; i < filtered.length; i++) {
+      const iou = computeIoU(best.detection.box, filtered[i].detection.box);
+      if (iou < iouThreshold) {
+        filtered[writeIdx++] = filtered[i];
+      }
+    }
+    filtered.length = writeIdx;
+  }
+  return keep;
+}
+
+let faceDebugFrame = 0;
 
 function matchAndTrackFaces(detections) {
   const usedIds = new Set();
@@ -646,30 +686,29 @@ export async function detectEmotion(videoElement) {
 export async function detectFaces(videoElement) {
   if (!videoElement || !videoElement.videoWidth) {
     recordFrameCapture(false);
+    updateFacePresence(false);
     return {
-      faceCount: 0, faceDetected: getSmoothedPresence(),
-      faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations: 0,
+      faceCount: 0, faceDetected: getFacePresence(),
+      faceBoxes: [],
     };
   }
   recordFrameCapture(true);
 
-  // When models aren't loaded, return optimistic result so proctoring
-  // doesn't fire false warnings during initialization
   if (!loaded) {
     return {
       faceCount: 1, faceDetected: true,
-      faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations: 0,
+      faceBoxes: [],
     };
   }
 
-  // Separate lock — does NOT block detectEmotion
   if (facesLock) {
     if (Date.now() - facesLockTime > LOCK_TIMEOUT_MS) {
       facesLock = false;
     } else {
+      updateFacePresence(false);
       return {
-        faceCount: 0, faceDetected: getSmoothedPresence(),
-        faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations: 0,
+        faceCount: 0, faceDetected: getFacePresence(),
+        faceBoxes: [],
       };
     }
   }
@@ -677,52 +716,70 @@ export async function detectFaces(videoElement) {
   facesLock = true;
   facesLockTime = Date.now();
   try {
-    const results = await faceapi.detectAllFaces(
+    const rawResults = await faceapi.detectAllFaces(
       videoElement,
-      // Face-only detection uses a slightly smaller input size for speed,
-      // since this runs in the proctoring loop alongside detectEmotion
       new faceapi.TinyFaceDetectorOptions({
         inputSize: INPUT_SIZE_FACE,
         scoreThreshold: FACE_CONFIDENCE_THRESHOLD,
       })
     );
 
-    let faceCount = results.length;
-    updateMultiFaceHistory(faceCount);
-    faceCount = isMultiFaceStable() ? faceCount : Math.min(faceCount, 1);
-    updatePresence(faceCount > 0);
+    faceDebugFrame++;
 
-    let faceChangeWarning = false;
-    let confirmations = 0;
+    // ── Step 1: Log raw detections ──
+    const rawCount = rawResults.length;
+    const rawSummary = rawResults.map((r, i) => {
+      const b = r.detection.box;
+      return `  Face ${i + 1}: confidence=${r.detection.score.toFixed(3)} box=[x=${b.x.toFixed(0)} y=${b.y.toFixed(0)} w=${b.width.toFixed(0)} h=${b.height.toFixed(0)}]`;
+    }).join('\n');
+    console.log(
+      `[FaceDetect] Frame ${faceDebugFrame}: RAW detections = ${rawCount}\n` +
+      rawSummary +
+      (rawCount === 0 ? '  (none)' : '')
+    );
 
-    if (faceCount > 1) {
-      const now = Date.now();
-      if (now - lastMultiFaceTime >= MULTI_FACE_COOLDOWN_MS) {
-        lastMultiFaceTime = now;
-        confirmations = multiFaceConfirmations + 1;
-        multiFaceConfirmations = confirmations;
-        faceChangeWarning = true;
-      } else {
-        confirmations = multiFaceConfirmations;
-      }
-    } else {
-      multiFaceConfirmations = Math.max(0, multiFaceConfirmations - 1);
-      confirmations = multiFaceConfirmations;
+    // ── Step 2: Apply NMS (confidence floor + non-maximum suppression) ──
+    // The NMS function filters out detections below RAW_CONFIDENCE_FLOOR,
+    // then keeps only the highest-confidence box per face by discarding
+    // any detection whose IoU with a higher-confidence box exceeds NMS_IOU_THRESHOLD.
+    const nmsResults = nonMaxSuppression(rawResults);
+    if (nmsResults.length !== rawCount) {
+      console.log(`[FaceDetect]   After NMS (conf>=${RAW_CONFIDENCE_FLOOR}, IoU>=${NMS_IOU_THRESHOLD}): ${rawCount} -> ${nmsResults.length} (removed ${rawCount - nmsResults.length})`);
     }
+
+    // ── Step 3: Detailed per-detection log for multi-face cases ──
+    if (nmsResults.length > 1) {
+      console.log(`[FaceDetect]   *** MULTI-FACE (${nmsResults.length} real detections) ***`);
+      for (let i = 0; i < nmsResults.length; i++) {
+        const b = nmsResults[i].detection.box;
+        console.log(
+          `[FaceDetect]     Real Face ${i + 1}: confidence=${nmsResults[i].detection.score.toFixed(3)} ` +
+          `box=[x=${b.x.toFixed(0)} y=${b.y.toFixed(0)} w=${b.width.toFixed(0)} h=${b.height.toFixed(0)}]`
+        );
+        // Check IoU with all other detections
+        for (let j = i + 1; j < nmsResults.length; j++) {
+          const iou = computeIoU(nmsResults[i].detection.box, nmsResults[j].detection.box);
+          console.log(`[FaceDetect]     IoU Face${i + 1} <-> Face${j + 1} = ${iou.toFixed(3)}`);
+        }
+      }
+    } else if (nmsResults.length === 1) {
+      console.log(`[FaceDetect]   Single face (confidence=${nmsResults[0].detection.score.toFixed(3)})`);
+    }
+
+    const faceCount = nmsResults.length;
+    updateFacePresence(faceCount > 0);
 
     return {
       faceCount,
-      faceDetected: getSmoothedPresence(),
-      faceBoxes: results.map((r) => r.detection.box),
-      faceChangeWarning,
-      multiFaceConfirmations: confirmations,
+      faceDetected: getFacePresence(),
+      faceBoxes: nmsResults.map((r) => r.detection.box),
     };
   } catch (err) {
-    console.warn('Multi-face detection error:', err.message);
-    updatePresence(false);
+    console.warn('[FaceDetect] Error:', err.message);
+    updateFacePresence(false);
     return {
-      faceCount: 0, faceDetected: getSmoothedPresence(),
-      faceBoxes: [], faceChangeWarning: false, multiFaceConfirmations,
+      faceCount: 0, faceDetected: getFacePresence(),
+      faceBoxes: [],
     };
   } finally {
     facesLock = false;
@@ -752,10 +809,6 @@ export function getSmoothedFaceState() {
   return { present: getSmoothedPresence(), history: [...presenceHistory] };
 }
 
-export function getMultiFaceWarningCount() {
-  return multiFaceConfirmations;
-}
-
 export function getFrameQualityStats() {
   return { ...frameQualityStats };
 }
@@ -779,7 +832,7 @@ export function resetDetectionState() {
   faceTracks.clear();
   nextFaceId = 0;
   presenceHistory = [];
-  multiFaceHistory = [];
+  facePresenceOnly = [];
   emotionVoteHistory = [];
   noFaceVoteFrames = 0;
   lastFaceTime = Date.now();
@@ -792,8 +845,6 @@ export function resetDetectionState() {
   frameQualityStats = {
     lastBrightness: -1, lastBlurMetric: -1, consecutiveLowQuality: 0,
   };
-  lastMultiFaceTime = 0;
-  multiFaceConfirmations = 0;
 }
 
 // ── Backend ViT fallback ──

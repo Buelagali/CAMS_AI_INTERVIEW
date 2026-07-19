@@ -87,8 +87,14 @@ export default function Result() {
           <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 4 }}>
             <strong>Reason:</strong> {proctoringTermination.terminationReason}
           </p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 4 }}>
+            <strong>Termination Type:</strong> Proctoring Rule Violation
+          </p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 4 }}>
+            <strong>Warnings Issued:</strong> {proctoringTermination.warningCount || 3}
+          </p>
           <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
-            <strong>Termination Type:</strong> {proctoringTermination.terminationType}
+            <strong>Evaluation:</strong> Only the responses answered before termination were evaluated.
           </p>
         </div>
       )}
@@ -161,8 +167,6 @@ export default function Result() {
           </ResponsiveContainer>
         </div>
       </div>
-
-      {/* ── Evaluation Evidence (hidden) ── */}
 
       {feedback.strengths && <FeedbackCard feedback={feedback} />}
 

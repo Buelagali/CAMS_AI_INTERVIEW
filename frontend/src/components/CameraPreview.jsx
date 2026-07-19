@@ -114,16 +114,18 @@ export default function CameraPreview({ videoRef, cameraActive, emotion, emotion
               position: 'absolute',
               top: 12,
               left: 12,
-              padding: '6px 12px',
+              padding: '10px 18px',
               borderRadius: 20,
-              background: 'rgba(255,71,87,0.2)',
-              border: '1px solid #ff4757',
-              fontSize: 12,
-              fontWeight: 600,
-              color: '#ff4757',
+              background: 'rgba(255,71,87,0.85)',
+              border: '2px solid #ff4757',
+              fontSize: 15,
+              fontWeight: 700,
+              color: '#fff',
+              zIndex: 10,
+              boxShadow: '0 0 20px rgba(255,71,87,0.4)',
             }}
           >
-            Multiple Faces Detected
+            ⚠ Multiple Faces Detected
           </div>
         )}
       </div>
